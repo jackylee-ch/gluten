@@ -153,17 +153,17 @@ class ConditionalSuspendedSection {
 int64_t WholeStageResultIterator::spillFixedSize(int64_t size) {
   std::string poolName{pool_->root()->name() + "/" + pool_->name()};
   std::string logPrefix{"Spill[" + poolName + "]: "};
-  DLOG(INFO) << logPrefix << "Trying to reclaim " << size << " bytes of data...";
-  DLOG(INFO) << logPrefix << "Pool has reserved " << pool_->currentBytes() << "/" << pool_->root()->reservedBytes()
+  DEBUG_OUT << logPrefix << "Trying to reclaim " << size << " bytes of data...";
+  DEBUG_OUT << logPrefix << "Pool has reserved " << pool_->currentBytes() << "/" << pool_->root()->reservedBytes()
              << "/" << pool_->root()->capacity() << "/" << pool_->root()->maxCapacity() << " bytes.";
-  DLOG(INFO) << logPrefix << "Shrinking...";
+  DEBUG_OUT << logPrefix << "Shrinking...";
   int64_t shrunken = pool_->shrinkManaged(pool_.get(), size);
-  DLOG(INFO) << logPrefix << shrunken << " bytes released from shrinking.";
+  DEBUG_OUT << logPrefix << shrunken << " bytes released from shrinking.";
 
   // todo return the actual spilled size?
   if (spillStrategy_ == "auto") {
     int64_t remaining = size - shrunken;
-    LOG(INFO) << logPrefix << "Trying to request spilling for " << remaining << " bytes...";
+    DEBUG_OUT << logPrefix << "Trying to request spilling for " << remaining << " bytes...";
     // if we are on one of the driver of the spilled task, suspend it
     velox::exec::Driver* thisDriver = nullptr;
     task_->testingVisitDrivers([&](velox::exec::Driver* driver) {
@@ -175,15 +175,15 @@ int64_t WholeStageResultIterator::spillFixedSize(int64_t size) {
     ConditionalSuspendedSection noCancel(thisDriver, thisDriver != nullptr);
     velox::exec::MemoryReclaimer::Stats status;
     uint64_t spilledOut = pool_->reclaim(remaining, status);
-    LOG(INFO) << logPrefix << "Successfully spilled out " << spilledOut << " bytes.";
+    DEBUG_OUT << logPrefix << "Successfully spilled out " << spilledOut << " bytes.";
     uint64_t total = shrunken + spilledOut;
-    DLOG(INFO) << logPrefix << "Successfully reclaimed total " << total << " bytes.";
+    DEBUG_OUT << logPrefix << "Successfully reclaimed total " << total << " bytes.";
     return total;
   } else {
-    LOG(WARNING) << "Spill-to-disk was disabled since " << kSpillStrategy << " was not configured.";
+    DEBUG_OUT << "Spill-to-disk was disabled since " << kSpillStrategy << " was not configured.";
   }
 
-  DLOG(INFO) << logPrefix << "Successfully reclaimed total " << shrunken << " bytes.";
+  DEBUG_OUT << logPrefix << "Successfully reclaimed total " << shrunken << " bytes.";
   return shrunken;
 }
 
