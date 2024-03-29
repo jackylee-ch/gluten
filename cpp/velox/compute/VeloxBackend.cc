@@ -223,20 +223,34 @@ void VeloxBackend::initCache(const std::shared_ptr<const facebook::velox::Config
     int32_t ssdCacheIOThreads = conf->get<int32_t>(kVeloxSsdCacheIOThreads, kVeloxSsdCacheIOThreadsDefault);
     std::string ssdCachePathPrefix = conf->get<std::string>(kVeloxSsdCachePath, kVeloxSsdCachePathDefault);
 
-    cachePathPrefix_ = ssdCachePathPrefix;
     cacheFilePrefix_ = getCacheFilePrefix();
-    std::string ssdCachePath = ssdCachePathPrefix + "/" + cacheFilePrefix_;
+    std::vector<std::string> ssdCachePaths;
+    std::istringstream iss(ssdCachePathPrefix);
+    std::string path;
+    std::error_code ec;
+    uint64_t ssdAvalibleSize = 0;
+    while (std::getline(iss, path, ',')) {
+      cachePathPrefixes_.push_back(path);
+      path = path + "/" + cacheFilePrefix_;
+      const std::filesystem::space_info si = std::filesystem::space(path, ec);
+      ssdAvalibleSize += si.available;
+      ssdCachePaths.push_back(path);
+    }
+    if (ssdAvalibleSize < ssdCacheSize) {
+      ssdCachePaths.clear();
+      cachePathPrefixes_.clear();
+      VELOX_FAIL(
+          "Not enough space for ssd cache in " + path + " cache size: " + std::to_string(ssdCacheSize) +
+          " free space: " + std::to_string(ssdAvalibleSize))
+    }
+
+    std::string ssdCachePath = std::accumulate(ssdCachePaths.begin(), ssdCachePaths.end(), std::string(),
+        [](const std::string &a, const std::string &b) -> std::string {
+          return a.empty() ? b : a + "," + b;
+        });
     ssdCacheExecutor_ = std::make_unique<folly::IOThreadPoolExecutor>(ssdCacheIOThreads);
     auto ssd =
         std::make_unique<velox::cache::SsdCache>(ssdCachePath, ssdCacheSize, ssdCacheShards, ssdCacheExecutor_.get());
-
-    std::error_code ec;
-    const std::filesystem::space_info si = std::filesystem::space(ssdCachePathPrefix, ec);
-    if (si.available < ssdCacheSize) {
-      VELOX_FAIL(
-          "not enough space for ssd cache in " + ssdCachePath + " cache size: " + std::to_string(ssdCacheSize) +
-          "free space: " + std::to_string(si.available))
-    }
 
     velox::memory::MmapAllocator::Options options;
     options.capacity = memCacheSize;

@@ -37,10 +37,15 @@ class VeloxBackend {
   ~VeloxBackend() {
     if (dynamic_cast<facebook::velox::cache::AsyncDataCache*>(asyncDataCache_.get())) {
       LOG(INFO) << asyncDataCache_->toString();
-      for (const auto& entry : std::filesystem::directory_iterator(cachePathPrefix_)) {
-        if (entry.path().filename().string().find(cacheFilePrefix_) != std::string::npos) {
-          LOG(INFO) << "Removing cache file " << entry.path().filename().string();
-          std::filesystem::remove(cachePathPrefix_ + "/" + entry.path().filename().string());
+      for (auto cachePathPrefix_ : cachePathPrefixes_) {
+        if (!std::filesystem::exists(cachePathPrefix_)) {
+          continue;
+        }
+        for (const auto &entry: std::filesystem::directory_iterator(cachePathPrefix_)) {
+          if (entry.path().filename().string().find(cacheFilePrefix_) != std::string::npos) {
+            LOG(INFO) << "Removing cache file " << entry.path().filename().string();
+            std::filesystem::remove(cachePathPrefix_ + "/" + entry.path().filename().string());
+          }
         }
       }
       asyncDataCache_->shutdown();
@@ -80,7 +85,7 @@ class VeloxBackend {
   std::unique_ptr<folly::IOThreadPoolExecutor> ioExecutor_;
   std::shared_ptr<facebook::velox::memory::MmapAllocator> cacheAllocator_;
 
-  std::string cachePathPrefix_;
+  std::vector<std::string> cachePathPrefixes_;
   std::string cacheFilePrefix_;
 
   std::unordered_map<std::string, std::string> backendConf_{};

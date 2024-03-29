@@ -39,6 +39,7 @@ import org.apache.spark.sql.execution.datasources.parquet.ParquetFileFormat
 import org.apache.spark.sql.expression.UDFResolver
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
+import org.apache.spark.util.SparkDirectoryUtil
 
 import scala.util.control.Breaks.breakable
 
@@ -444,6 +445,7 @@ object BackendSettings extends BackendSettingsApi {
 
   override def resolveNativeConf(nativeConf: java.util.Map[String, String]): Unit = {
     checkMaxBatchSize(nativeConf)
+    resolveVeloxCacheConfig(nativeConf)
     UDFResolver.resolveUdfConf(nativeConf)
   }
 
@@ -480,6 +482,28 @@ object BackendSettings extends BackendSettingsApi {
         throw new IllegalArgumentException(
           s"The maximum value of ${GlutenConfig.GLUTEN_MAX_BATCH_SIZE_KEY}" +
             s" is $MAXIMUM_BATCH_SIZE for Velox backend.")
+      }
+    }
+  }
+
+  private def resolveVeloxCacheConfig(nativeConf: java.util.Map[String, String]): Unit = {
+    if (
+      !nativeConf.getOrDefault(GlutenConfig.COLUMNAR_VELOX_CACHE_ENABLED.key, "false").toBoolean
+    ) {
+      return
+    }
+
+    if (nativeConf.containsKey(GlutenConfig.COLUMNAR_VELOX_SSD_CACHE_PATH.key)) {
+      // Check if the path is valid.
+      val ssdCachePath = nativeConf.get(GlutenConfig.COLUMNAR_VELOX_SSD_CACHE_PATH.key)
+      if (ssdCachePath.startsWith(".")) {
+        // Use all local dirs as cache path.
+        val absoluteCachePaths = SparkDirectoryUtil
+          .namespace("cache")
+          .mkChildDirs(ssdCachePath)
+          .map(_.getAbsolutePath)
+          .mkString(",")
+        nativeConf.put(GlutenConfig.COLUMNAR_VELOX_SSD_CACHE_PATH.key, absoluteCachePaths)
       }
     }
   }
