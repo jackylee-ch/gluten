@@ -36,6 +36,7 @@
 #include <Core/Settings.h>
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypeNullable.h>
+#include <DataTypes/DataTypeMap.h>
 #include <DataTypes/DataTypeString.h>
 #include <DataTypes/DataTypeTuple.h>
 #include <DataTypes/DataTypesDecimal.h>
@@ -80,10 +81,6 @@ namespace ServerSetting
 extern const ServerSettingsString primary_index_cache_policy;
 extern const ServerSettingsUInt64 primary_index_cache_size;
 extern const ServerSettingsDouble primary_index_cache_size_ratio;
-extern const ServerSettingsString skipping_index_cache_policy;
-extern const ServerSettingsUInt64 skipping_index_cache_size;
-extern const ServerSettingsUInt64 skipping_index_cache_max_entries;
-extern const ServerSettingsDouble skipping_index_cache_size_ratio;
 extern const ServerSettingsUInt64 max_prefixes_deserialization_thread_pool_size;
 extern const ServerSettingsUInt64 max_prefixes_deserialization_thread_pool_free_size;
 extern const ServerSettingsUInt64 prefixes_deserialization_thread_pool_thread_pool_queue_size;
@@ -91,6 +88,10 @@ extern const ServerSettingsUInt64 max_thread_pool_size;
 extern const ServerSettingsUInt64 thread_pool_queue_size;
 extern const ServerSettingsUInt64 max_io_thread_pool_size;
 extern const ServerSettingsUInt64 io_thread_pool_queue_size;
+extern const ServerSettingsString vector_similarity_index_cache_policy;
+extern const ServerSettingsUInt64 vector_similarity_index_cache_size;
+extern const ServerSettingsUInt64 vector_similarity_index_cache_max_entries;
+extern const ServerSettingsDouble vector_similarity_index_cache_size_ratio;
 }
 namespace Setting
 {
@@ -102,6 +103,7 @@ extern const SettingsBool query_plan_merge_filters;
 extern const SettingsBool compile_expressions;
 extern const SettingsShortCircuitFunctionEvaluation short_circuit_function_evaluation;
 extern const SettingsUInt64 output_format_compression_level;
+extern const SettingsBool query_plan_optimize_lazy_materialization;
 }
 namespace ErrorCodes
 {
@@ -315,6 +317,32 @@ DB::Block BlockUtil::concatenateBlocksMemoryEfficiently(std::vector<DB::Block> &
 
     out.setColumns(std::move(columns));
     return out;
+}
+
+bool TypeUtil::hasNothingType(DB::DataTypePtr data_type)
+{
+    if (DB::isNothing(data_type))
+        return true;
+    else if (data_type->isNullable())
+        return hasNothingType(typeid_cast<const DB::DataTypeNullable *>(data_type.get())->getNestedType());
+    else if (DB::isArray(data_type))
+        return hasNothingType(typeid_cast<const DB::DataTypeArray *>(data_type.get())->getNestedType());
+    else if (DB::isMap(data_type))
+    {
+        const auto * type_map = typeid_cast<const DB::DataTypeMap *>(data_type.get());
+        return hasNothingType(type_map->getKeyType()) || hasNothingType(type_map->getValueType());
+    }
+    else if (DB::isTuple(data_type))
+    {
+        const auto * type_tuple = typeid_cast<const DB::DataTypeTuple *>(data_type.get());
+        for (size_t i = 0; i < type_tuple->getElements().size(); ++i)
+        {
+            if (hasNothingType(type_tuple->getElements()[i]))
+                return true;
+        }
+    }
+    return false;
+
 }
 
 size_t PODArrayUtil::adjustMemoryEfficientSize(size_t n)
@@ -665,6 +693,11 @@ void BackendInitializerUtil::initSettings(const SparkConfigs::ConfigMap & spark_
     /// output_format_compression_level is set to 3, which is wrong, since snappy does not support it.
     settings[Setting::output_format_compression_level] = arrow::util::kUseDefaultCompressionLevel;
 
+    /// 6. After https://github.com/ClickHouse/ClickHouse/pull/55518
+    /// We currently do not support lazy materialization.
+    /// "test 'order by' two keys" will failed if we enable it.
+    settings[Setting::query_plan_optimize_lazy_materialization] = false;
+    
     for (const auto & [key, value] : spark_conf_map)
     {
         // Firstly apply spark.gluten.sql.columnar.backend.ch.runtime_config.local_engine.settings.* to settings
@@ -817,13 +850,13 @@ void BackendInitializerUtil::initContexts(DB::Context::ConfigurationPtr config)
         double index_mark_cache_size_ratio = config->getDouble("index_mark_cache_size_ratio", DEFAULT_INDEX_MARK_CACHE_SIZE_RATIO);
         global_context->setIndexMarkCache(index_mark_cache_policy, index_mark_cache_size, index_mark_cache_size_ratio);
 
-        String skipping_index_cache_policy = server_settings[ServerSetting::skipping_index_cache_policy];
-        size_t skipping_index_cache_size = server_settings[ServerSetting::skipping_index_cache_size];
-        size_t skipping_index_cache_max_entries = server_settings[ServerSetting::skipping_index_cache_max_entries];
-        double skipping_index_cache_size_ratio = server_settings[ServerSetting::skipping_index_cache_size_ratio];
-        LOG_INFO(log, "Skipping index cache size to {}", formatReadableSizeWithBinarySuffix(skipping_index_cache_size));
-        global_context->setSkippingIndexCache(
-            skipping_index_cache_policy, skipping_index_cache_size, skipping_index_cache_max_entries, skipping_index_cache_size_ratio);
+        String vector_similarity_index_cache_policy = server_settings[ServerSetting::vector_similarity_index_cache_policy];
+        size_t vector_similarity_index_cache_size = server_settings[ServerSetting::vector_similarity_index_cache_size];
+        size_t vector_similarity_index_cache_max_count = server_settings[ServerSetting::vector_similarity_index_cache_max_entries];
+        double vector_similarity_index_cache_size_ratio = server_settings[ServerSetting::vector_similarity_index_cache_size_ratio];
+        LOG_INFO(log, "Lowered vector similarity index cache size to {} because the system has limited RAM", formatReadableSizeWithBinarySuffix(vector_similarity_index_cache_size));
+
+        global_context->setVectorSimilarityIndexCache(vector_similarity_index_cache_policy, vector_similarity_index_cache_size, vector_similarity_index_cache_max_count, vector_similarity_index_cache_size_ratio);
 
         getMergeTreePrefixesDeserializationThreadPool().initialize(
             server_settings[ServerSetting::max_prefixes_deserialization_thread_pool_size],
