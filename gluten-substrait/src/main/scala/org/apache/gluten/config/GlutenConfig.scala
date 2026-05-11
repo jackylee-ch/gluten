@@ -1023,6 +1023,37 @@ object GlutenConfig extends ConfigRegistry {
       .booleanConf
       .createWithDefault(false)
 
+  val COLUMNAR_TABLE_CACHE_FILTER_PUSHDOWN_ENABLED =
+    buildConf("spark.gluten.sql.columnar.tableCache.filterPushdown.enabled")
+      .internal()
+      .doc(
+        "When enabled, Gluten's columnar table cache collects per-column min/max/nullCount " +
+          "statistics on the native side during cache write, so that " +
+          "InMemoryTableScanExec can skip cached batches whose statistics don't match the " +
+          "scan predicate (equivalent to Spark's SimpleMetricsCachedBatchSerializer). " +
+          "Disabled by default to match pre-feature behavior; flip to true to opt in. Has no " +
+          "effect when spark.gluten.sql.columnar.tableCache is false, and is additionally " +
+          "suppressed at the writer when " +
+          "spark.gluten.sql.columnar.tableCache.stats.wire.v1.enabled=false (rolling-upgrade " +
+          "kill switch); in that case reads continue to decode both v0 and v1 transparently, " +
+          "but writes emit v0 only and no stats are produced for new cache blocks.")
+      .booleanConf
+      .createWithDefault(false)
+
+  val COLUMNAR_TABLE_CACHE_STATS_WIRE_V1_ENABLED =
+    buildConf("spark.gluten.sql.columnar.tableCache.stats.wire.v1.enabled")
+      .internal()
+      .doc(
+        "Rolling-upgrade kill switch for the stats-carrying v1 Kryo wire format. When false, " +
+          "the writer always emits the v0 wire format (no stats) even if filter pushdown is " +
+          "enabled. Use this during a rolling upgrade where some executors still run a " +
+          "pre-filter-pushdown Gluten binary: those old readers do not recognize the v1 magic " +
+          "header and would mis-parse it as a negative `numRows`, allocating a garbage-sized " +
+          "byte[] and crashing. Flip back to true once the cluster is fully upgraded. Has no " +
+          "effect when spark.gluten.sql.columnar.tableCache.filterPushdown.enabled is false.")
+      .booleanConf
+      .createWithDefault(true)
+
   val COLUMNAR_PHYSICAL_JOIN_OPTIMIZATION_THROTTLE =
     buildConf("spark.gluten.sql.columnar.physicalJoinOptimizationLevel")
       .doc("Fallback to row operators if there are several continuous joins.")

@@ -50,6 +50,10 @@ jclass jniUnsafeByteBufferClass;
 jmethodID jniUnsafeByteBufferAllocate;
 jmethodID jniUnsafeByteBufferAddress;
 jmethodID jniUnsafeByteBufferSize;
+jmethodID jniUnsafeByteBufferRelease;
+
+jclass cachedBatchSerializeResultClass;
+jmethodID cachedBatchSerializeResultConstructor;
 
 jclass jniByteInputStreamClass;
 jmethodID jniByteInputStreamRead;
@@ -145,6 +149,72 @@ class JavaInputStreamAdaptor final : public arrow::io::InputStream {
   JavaVM* vm_;
   jobject jniIn_;
   bool closed_ = false;
+};
+
+// RAII guard that releases a JniUnsafeByteBuffer's off-heap ArrowBuf if the
+// scope exits while still armed. This is used by `serialize` /
+// `serializeWithStats` to avoid leaking the buffer when a downstream JNI call
+// (e.g. NewByteArray, NewObject, SetByteArrayRegion) fails between buffer
+// allocation and Java-side ownership transfer via `toByteArray` /
+// `toUnsafeByteArray`. Call `disarm()` on the success path before returning.
+//
+// Exception safety: the destructor runs during stack unwinding. On entry there
+// are two possible states of the JVM's per-thread exception slot:
+//
+//   (A) No pending exception. Most common path: `checkException(env)` at a
+//       higher frame already ExceptionClear'd the JNI exception and rethrew it
+//       as a C++ GlutenException; by the time we unwind here, the JVM's slot
+//       is empty.
+//
+//   (B) A pending Java exception. Possible if a future refactor lets a C++
+//       throw escape before reaching `checkException`, or if `NewObject` left
+//       an exception pending and some downstream code throws std::bad_alloc.
+//       Calling CallVoidMethod with a pending Java exception is undefined
+//       behaviour per the JNI spec.
+//
+// We handle both by stashing any pending exception, clearing the slot, calling
+// release(), clearing any new exception release() may have raised (e.g. the
+// IllegalStateException from a double-free), and finally rethrowing the
+// original Java exception so the surrounding JNI handler still sees it.
+class JniUnsafeByteBufferReleaseGuard {
+ public:
+  JniUnsafeByteBufferReleaseGuard(JNIEnv* env, jobject byteBuffer)
+      : env_(env), byteBuffer_(byteBuffer), armed_(byteBuffer != nullptr) {}
+  ~JniUnsafeByteBufferReleaseGuard() {
+    if (!armed_ || byteBuffer_ == nullptr) {
+      return;
+    }
+    // Stash any pre-existing pending Java exception so CallVoidMethod does
+    // not run with UB-level JNI state. We clear it before the call and
+    // rethrow it after, so the caller's JNI frame still surfaces the
+    // original failure.
+    jthrowable pending = env_->ExceptionOccurred();
+    if (pending != nullptr) {
+      env_->ExceptionClear();
+    }
+    env_->CallVoidMethod(byteBuffer_, jniUnsafeByteBufferRelease);
+    // release() may raise its own exception (e.g. IllegalStateException when
+    // called after an explicit release by the Java owner). We swallow that
+    // one so it cannot mask the stashed primary failure.
+    if (env_->ExceptionCheck()) {
+      env_->ExceptionClear();
+    }
+    if (pending != nullptr) {
+      env_->Throw(pending);
+      env_->DeleteLocalRef(pending);
+    }
+  }
+  JniUnsafeByteBufferReleaseGuard(const JniUnsafeByteBufferReleaseGuard&) = delete;
+  JniUnsafeByteBufferReleaseGuard& operator=(const JniUnsafeByteBufferReleaseGuard&) = delete;
+
+  void disarm() {
+    armed_ = false;
+  }
+
+ private:
+  JNIEnv* env_;
+  jobject byteBuffer_;
+  bool armed_;
 };
 
 /// Internal backend consists of empty implementations of Runtime API and MemoryManager API.
@@ -258,10 +328,31 @@ jint JNI_OnLoad(JavaVM* vm, void* reserved) {
 
   jniUnsafeByteBufferClass =
       createGlobalClassReferenceOrError(env, "Lorg/apache/spark/sql/execution/unsafe/JniUnsafeByteBuffer;");
-  jniUnsafeByteBufferAllocate = env->GetStaticMethodID(
-      jniUnsafeByteBufferClass, "allocate", "(J)Lorg/apache/spark/sql/execution/unsafe/JniUnsafeByteBuffer;");
-  jniUnsafeByteBufferAddress = env->GetMethodID(jniUnsafeByteBufferClass, "address", "()J");
-  jniUnsafeByteBufferSize = env->GetMethodID(jniUnsafeByteBufferClass, "size", "()J");
+  // Use the *OrError variants (matching all other symbol lookups in this function) so
+  // an ABI drift between the native .so and a stale / mismatched JniUnsafeByteBuffer
+  // class (renamed method, changed signature, shading accident) becomes an
+  // UnsatisfiedLinkError at load time rather than a NULL jmethodID stored in these
+  // globals. With the raw `GetMethodID` form, a missing symbol would leave a pending
+  // `NoSuchMethodError` that no subsequent call clears, and later
+  // `env->CallVoidMethod(..., NULL)` inside `JniUnsafeByteBufferReleaseGuard` is UB
+  // per the JNI spec. Matching the surrounding convention also removes the "why is
+  // this block different" surprise for future readers.
+  jniUnsafeByteBufferAllocate = getStaticMethodIdOrError(
+      env, jniUnsafeByteBufferClass, "allocate", "(J)Lorg/apache/spark/sql/execution/unsafe/JniUnsafeByteBuffer;");
+  jniUnsafeByteBufferAddress = getMethodIdOrError(env, jniUnsafeByteBufferClass, "address", "()J");
+  jniUnsafeByteBufferSize = getMethodIdOrError(env, jniUnsafeByteBufferClass, "size", "()J");
+  // Used by JNI error-recovery paths in `serialize` / `serializeWithStats` to free
+  // the off-heap ArrowBuf when NewByteArray / NewObject fails after buffer
+  // allocation but before Java takes ownership via toByteArray/toUnsafeByteArray.
+  jniUnsafeByteBufferRelease = getMethodIdOrError(env, jniUnsafeByteBufferClass, "release", "()V");
+
+  cachedBatchSerializeResultClass =
+      createGlobalClassReferenceOrError(env, "Lorg/apache/gluten/vectorized/CachedBatchSerializeResult;");
+  cachedBatchSerializeResultConstructor = getMethodIdOrError(
+      env,
+      cachedBatchSerializeResultClass,
+      "<init>",
+      "(Lorg/apache/spark/sql/execution/unsafe/JniUnsafeByteBuffer;[B)V");
 
   jniByteInputStreamClass = createGlobalClassReferenceOrError(env, "Lorg/apache/gluten/vectorized/JniByteInputStream;");
   jniByteInputStreamRead = getMethodIdOrError(env, jniByteInputStreamClass, "read", "(JJ)J");
@@ -306,6 +397,7 @@ void JNI_OnUnload(JavaVM* vm, void* reserved) {
   env->DeleteGlobalRef(nativeColumnarToRowInfoClass);
   env->DeleteGlobalRef(byteArrayClass);
   env->DeleteGlobalRef(jniUnsafeByteBufferClass);
+  env->DeleteGlobalRef(cachedBatchSerializeResultClass);
   env->DeleteGlobalRef(shuffleReaderMetricsClass);
 
   getJniErrorState()->close();
@@ -1285,12 +1377,146 @@ JNIEXPORT jobject JNICALL Java_org_apache_gluten_vectorized_ColumnarBatchSeriali
   auto serializer = ctx->createColumnarBatchSerializer(nullptr);
   serializer->append(batch);
   auto serializedSize = serializer->maxSerializedSize();
+  // Defensive guard against a zero-sized payload: `JniUnsafeByteBuffer.allocate(0)`
+  // ultimately calls into `ArrowBufferAllocators.globalInstance().buffer(0)`, whose
+  // behavior on a zero request is not contractually specified — some allocator
+  // implementations return a buffer whose `memoryAddress()` is null, which would
+  // then be handed to `serializeTo` as a raw pointer for `memcpy`. In practice
+  // this path is unreachable because `enableStatsCollection + append(batch)`
+  // produces a non-zero header even for empty batches, but a refactor that
+  // makes `maxSerializedSize` honest about zero-row batches would quietly
+  // trigger UB without this check.
+  GLUTEN_CHECK(
+      serializedSize > 0,
+      "Serializer returned zero max serialized size; refusing to allocate a zero-byte JniUnsafeByteBuffer "
+      "to avoid undefined behavior in downstream pointer arithmetic.");
   auto byteBuffer = env->CallStaticObjectMethod(jniUnsafeByteBufferClass, jniUnsafeByteBufferAllocate, serializedSize);
+  // If the Java side throws (e.g., ArrowBuf allocation OOM), `byteBuffer`
+  // may be null and subsequent JNI calls with a pending exception can crash
+  // or silently no-op. Check and propagate the exception before touching the
+  // returned handle.
+  checkException(env);
+
+  // From here until the successful return, any thrown exception must release
+  // the off-heap ArrowBuf. The Java side only releases it in
+  // toByteArray/toUnsafeByteArray, which the caller hasn't reached yet.
+  JniUnsafeByteBufferReleaseGuard bufferGuard(env, byteBuffer);
+
   auto byteBufferAddress = env->CallLongMethod(byteBuffer, jniUnsafeByteBufferAddress);
+  // A pending exception from the address() call would make the size() call
+  // run with undefined behavior, so we check between them. `checkException`
+  // throws a GlutenException, which unwinds through bufferGuard to release.
+  checkException(env);
   auto byteBufferSize = env->CallLongMethod(byteBuffer, jniUnsafeByteBufferSize);
+  checkException(env);
   serializer->serializeTo(reinterpret_cast<uint8_t*>(byteBufferAddress), byteBufferSize);
 
+  // Java takes ownership on the success path.
+  bufferGuard.disarm();
   return byteBuffer;
+  JNI_METHOD_END(nullptr)
+}
+
+JNIEXPORT jobject JNICALL
+Java_org_apache_gluten_vectorized_ColumnarBatchSerializerJniWrapper_serializeWithStats( // NOLINT
+    JNIEnv* env,
+    jobject wrapper,
+    jlong batchHandle) {
+  JNI_METHOD_START
+  auto ctx = getRuntime(env, wrapper);
+
+  auto batch = ObjectStore::retrieve<ColumnarBatch>(batchHandle);
+  GLUTEN_DCHECK(batch != nullptr, "Cannot find the ColumnarBatch with handle " + std::to_string(batchHandle));
+
+  auto serializer = ctx->createColumnarBatchSerializer(nullptr);
+  // Must opt into stats before append so that the first batch is captured.
+  serializer->enableStatsCollection();
+  serializer->append(batch);
+
+  auto serializedSize = serializer->maxSerializedSize();
+  // Defensive guard against a zero-sized payload: `JniUnsafeByteBuffer.allocate(0)`
+  // ultimately calls into `ArrowBufferAllocators.globalInstance().buffer(0)`, whose
+  // behavior on a zero request is not contractually specified — some allocator
+  // implementations return a buffer whose `memoryAddress()` is null, which would
+  // then be handed to `serializeTo` as a raw pointer for `memcpy`. In practice
+  // this path is unreachable because `enableStatsCollection + append(batch)`
+  // produces a non-zero header even for empty batches, but a refactor that
+  // makes `maxSerializedSize` honest about zero-row batches would quietly
+  // trigger UB without this check.
+  GLUTEN_CHECK(
+      serializedSize > 0,
+      "Serializer returned zero max serialized size; refusing to allocate a zero-byte JniUnsafeByteBuffer "
+      "to avoid undefined behavior in downstream pointer arithmetic.");
+  auto byteBuffer = env->CallStaticObjectMethod(jniUnsafeByteBufferClass, jniUnsafeByteBufferAllocate, serializedSize);
+  // Check for Java-side allocation failure (OOM in ArrowBufferAllocators).
+  // Without this, the two CallLongMethod's below can run with a pending
+  // exception and crash on a null byteBuffer handle.
+  checkException(env);
+  GLUTEN_CHECK(byteBuffer != nullptr, "JniUnsafeByteBuffer.allocate returned null");
+
+  // From here until the successful NewObject of the result, any thrown
+  // exception must release the off-heap ArrowBuf. The Java `toByteArray` /
+  // `toUnsafeByteArray` path that normally releases it is reached only via
+  // the returned CachedBatchSerializeResult; if NewByteArray / NewObject /
+  // SetByteArrayRegion throws, the Java caller never sees the buffer and
+  // the ArrowBuf would leak for the remainder of the allocator's lifetime.
+  JniUnsafeByteBufferReleaseGuard bufferGuard(env, byteBuffer);
+
+  auto byteBufferAddress = env->CallLongMethod(byteBuffer, jniUnsafeByteBufferAddress);
+  // A pending exception from address() would make size() run with undefined
+  // behavior. `checkException` throws GlutenException, which unwinds through
+  // bufferGuard's destructor to release the ArrowBuf.
+  checkException(env);
+  auto byteBufferSize = env->CallLongMethod(byteBuffer, jniUnsafeByteBufferSize);
+  checkException(env);
+  serializer->serializeTo(reinterpret_cast<uint8_t*>(byteBufferAddress), byteBufferSize);
+
+  // Backends that don't implement stats return 0-byte payloads; we represent
+  // that as a null Java byte[] so the Scala side's decodeStats short-circuits.
+  jbyteArray statsArray = nullptr;
+  const int32_t statsSize = serializer->statsSerializedSize();
+  if (statsSize > 0) {
+    statsArray = env->NewByteArray(statsSize);
+    checkException(env);
+    GLUTEN_CHECK(statsArray != nullptr, "Failed to allocate stats byte[]");
+    // Copy directly from the serializer's cached buffer into the Java array
+    // to avoid the intermediate std::vector<uint8_t>.
+    const uint8_t* statsData = serializer->statsSerializedData();
+    if (statsData != nullptr) {
+      env->SetByteArrayRegion(statsArray, 0, statsSize, reinterpret_cast<const jbyte*>(statsData));
+    } else {
+      // Backends that only implement serializeStatsTo: fall back to staging
+      // through a local buffer (small overhead, only triggered for stats
+      // implementations predating statsSerializedData).
+      std::vector<uint8_t> statsBuf(statsSize);
+      serializer->serializeStatsTo(statsBuf.data());
+      env->SetByteArrayRegion(statsArray, 0, statsSize, reinterpret_cast<const jbyte*>(statsBuf.data()));
+    }
+    checkException(env);
+  }
+
+  jobject result =
+      env->NewObject(cachedBatchSerializeResultClass, cachedBatchSerializeResultConstructor, byteBuffer, statsArray);
+  checkException(env);
+  // Paranoia: NewObject can return null without setting a pending exception
+  // in narrow edge cases (e.g. class unloading). Fail loud rather than leak
+  // the ArrowBuf because bufferGuard.disarm() runs below.
+  GLUTEN_CHECK(result != nullptr, "NewObject returned null for CachedBatchSerializeResult");
+
+  // Java now owns the byteBuffer through the returned CachedBatchSerializeResult.
+  bufferGuard.disarm();
+  // Release the intermediate local refs we no longer need on this JNI call.
+  // The returned `result` keeps `byteBuffer` and `statsArray` reachable via
+  // Java-side fields, so the JVM GC will not collect them. Without these
+  // explicit deletes, a long-running writer that calls `serializeWithStats`
+  // once per batch accumulates local refs in the frame until the JNI method
+  // returns, which in turn means the local-ref table pressure scales with
+  // the batch count if C++ ever calls this in a nested fashion.
+  env->DeleteLocalRef(byteBuffer);
+  if (statsArray != nullptr) {
+    env->DeleteLocalRef(statsArray);
+  }
+  return result;
   JNI_METHOD_END(nullptr)
 }
 

@@ -37,6 +37,30 @@ class ColumnarBatchSerializer {
 
   virtual std::shared_ptr<ColumnarBatch> deserialize(uint8_t* data, int32_t size) = 0;
 
+  // Optional: opt into per-column min/max/nullCount stats collection during
+  // `append`. Default is a no-op — backends that don't collect stats simply
+  // report zero size and a no-op serialize.
+  virtual void enableStatsCollection() {}
+
+  // Size of the stats payload. Zero means no stats available (either the
+  // backend doesn't support stats or none were enabled).
+  virtual int32_t statsSerializedSize() {
+    return 0;
+  }
+
+  // Write the stats payload into `dest`. Caller must ensure the buffer has at
+  // least `statsSerializedSize()` bytes. No-op when stats collection is off.
+  virtual void serializeStatsTo(uint8_t* /*dest*/) {}
+
+  // Return a pointer to the cached stats bytes. Lifetime is tied to the
+  // serializer instance and is invalidated by the next `append` call. Returns
+  // nullptr by default (backends without stats collection). When available,
+  // callers may copy directly from this pointer to avoid an intermediate
+  // buffer (see `ColumnarBatchSerializerJniWrapper_serializeWithStats`).
+  virtual const uint8_t* statsSerializedData() {
+    return nullptr;
+  }
+
  protected:
   arrow::MemoryPool* arrowPool_;
 };

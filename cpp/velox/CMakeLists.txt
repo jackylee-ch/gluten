@@ -175,6 +175,7 @@ set(VELOX_SRCS
     operators/hashjoin/HashTableBuilder.cc
     operators/reader/FileReaderIterator.cc
     operators/reader/ParquetReaderIterator.cc
+    operators/serializer/BatchStatsCollector.cc
     operators/serializer/VeloxColumnarBatchSerializer.cc
     operators/serializer/VeloxColumnarToRowConverter.cc
     operators/serializer/VeloxRowToColumnarConverter.cc

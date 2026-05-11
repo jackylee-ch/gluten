@@ -53,12 +53,35 @@ static inline void checkException(JNIEnv* env) {
     jthrowable t = env->ExceptionOccurred();
     env->ExceptionClear();
 
-    jclass describerClass = env->FindClass("org/apache/gluten/exception/JniExceptionDescriber");
-    jmethodID describeMethod =
-        env->GetStaticMethodID(describerClass, "describe", "(Ljava/lang/Throwable;)Ljava/lang/String;");
-
     std::stringstream message;
     message << "Error during calling Java code from native code: ";
+
+    // FindClass after ExceptionClear can itself raise a pending exception
+    // (typically ClassNotFoundException / NoClassDefFoundError) and return
+    // null. Without these guards, GetStaticMethodID / CallStaticObjectMethod
+    // would run with a pending exception and then recurse through this very
+    // function when callers call checkException again -- a re-entrant loop.
+    jclass describerClass = env->FindClass("org/apache/gluten/exception/JniExceptionDescriber");
+    if (describerClass == nullptr) {
+      if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+      }
+      message << "(unable to describe: JniExceptionDescriber class not found)";
+      env->DeleteLocalRef(t);
+      throw gluten::GlutenException(message.str());
+    }
+
+    jmethodID describeMethod =
+        env->GetStaticMethodID(describerClass, "describe", "(Ljava/lang/Throwable;)Ljava/lang/String;");
+    if (describeMethod == nullptr) {
+      if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+      }
+      message << "(unable to describe: JniExceptionDescriber.describe method not found)";
+      env->DeleteLocalRef(describerClass);
+      env->DeleteLocalRef(t);
+      throw gluten::GlutenException(message.str());
+    }
 
     const auto description = static_cast<jstring>(env->CallStaticObjectMethod(describerClass, describeMethod, t));
 
@@ -72,6 +95,17 @@ static inline void checkException(JNIEnv* env) {
         message << e.what();
       }
     }
+
+    // Release every local ref we created in this method before throwing.
+    // Although the frame is normally popped by the outer JNI method return,
+    // checkException may be called many times in a single native method (see
+    // JniWrapper.cc `serializeWithStats`), and leaking per-call refs across
+    // an unbounded loop fills the local ref table.
+    if (description != nullptr) {
+      env->DeleteLocalRef(description);
+    }
+    env->DeleteLocalRef(describerClass);
+    env->DeleteLocalRef(t);
 
     throw gluten::GlutenException(message.str());
   }

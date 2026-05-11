@@ -37,7 +37,19 @@ public class ColumnarBatchSerializerJniWrapper implements RuntimeAware {
     return runtime.getHandle();
   }
 
-  public native JniUnsafeByteBuffer serialize(long handle);
+  public native JniUnsafeByteBuffer serialize(long batchHandle);
+
+  /**
+   * Serialize a single ColumnarBatch and also collect per-column min/max/nullCount/rowCount/
+   * sizeInBytes statistics during the same pass. Used by the table-cache path to enable batch-level
+   * filter pushdown via Spark's {@code SimpleMetricsCachedBatchSerializer}.
+   *
+   * <p>The returned {@link CachedBatchSerializeResult#getStats()} may be {@code null} when the
+   * native side chooses not to emit stats (e.g. unsupported schema).
+   *
+   * @param batchHandle native ColumnarBatch handle to serialize
+   */
+  public native CachedBatchSerializeResult serializeWithStats(long batchHandle);
 
   // Return the native ColumnarBatchSerializer handle
   public native long init(long cSchema);
