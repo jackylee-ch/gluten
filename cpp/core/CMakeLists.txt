@@ -154,6 +154,16 @@ file(MAKE_DIRECTORY ${root_directory}/releases)
 add_library(gluten SHARED ${SPARK_COLUMNAR_PLUGIN_SRCS})
 add_dependencies(gluten jni_proto)
 
+# On macOS, libgluten.dylib links libgflags.a with -load_hidden (see
+# cpp/CMake/Findglog.cmake). That hides the gflags copy pulled in by
+# libgluten.dylib, but libvelox.dylib has an undefined reference to
+# google::HandleCommandLineHelpFlags that previously resolved against
+# libgluten.dylib's exported copy. Provide an exported no-op stub so
+# libvelox.dylib can still find the symbol at dlopen time.
+if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
+  target_sources(gluten PRIVATE utils/GflagsStubDarwin.cc)
+endif()
+
 # Hide symbols of some static dependencies. Otherwise, if such dependencies are
 # already statically linked to libvelox.so, a runtime error will be reported:
 # xxx is being linked both statically and dynamically.

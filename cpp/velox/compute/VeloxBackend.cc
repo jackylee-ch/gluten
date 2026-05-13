@@ -113,7 +113,9 @@ void VeloxBackend::init(
     }
   }
   FLAGS_logtostderr = true;
-  google::InitGoogleLogging("gluten");
+  if (!google::IsGoogleLoggingInitialized()) {
+    google::InitGoogleLogging("gluten");
+  }
 
   globalMemoryManager_ = std::make_unique<VeloxMemoryManager>(kVeloxBackendKind, std::move(listener), *backendConf_);
 
@@ -352,6 +354,9 @@ std::unique_ptr<VeloxBackend> VeloxBackend::instance_ = nullptr;
 void VeloxBackend::create(
     std::unique_ptr<AllocationListener> listener,
     const std::unordered_map<std::string, std::string>& conf) {
+  if (instance_) {
+    return;
+  }
   instance_ = std::unique_ptr<VeloxBackend>(new VeloxBackend(std::move(listener), conf));
 }
 
