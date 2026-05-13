@@ -15,6 +15,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# On macOS, github.com / codeload.github.com is intermittently unreliable
+# (HTTP/2 framing errors, empty replies). Force HTTP/1.1 and add --retry/
+# --speed-limit so stalled downloads abort quickly instead of hanging.
+# wget_and_untar (Gluten's and Velox's) forwards $CURL_OPTIONS into curl.
+if [[ "$(uname)" == "Darwin" && -z "${CURL_OPTIONS:-}" ]]; then
+  export CURL_OPTIONS="--http1.1 --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 --speed-limit 10000 --speed-time 15"
+fi
+
 function get_cxx_flags {
   local CPU_ARCH=$1
 
@@ -158,9 +166,23 @@ function github_checkout {
 function wget_and_untar {
   local URL=$1
   local DIR=$2
+  # Cache downloaded tarballs outside managed dirs so that `rm -rf $DIR` doesn't
+  # kill them. Lets a flaky github.com retry succeed on a later run, and speeds
+  # up re-runs. Override with GLUTEN_DOWNLOAD_CACHE.
+  local CACHE_DIR="${GLUTEN_DOWNLOAD_CACHE:-$HOME/.cache/gluten-downloads}"
+  mkdir -p "$CACHE_DIR"
+  local CACHE_FILE="$CACHE_DIR/$(basename "$URL")"
   mkdir -p "${DIR}"
   pushd "${DIR}"
-  curl -L "${URL}" > $2.tar.gz
+  if [ -s "$CACHE_FILE" ] && tar -tzf "$CACHE_FILE" >/dev/null 2>&1; then
+    echo "Using cached tarball: $CACHE_FILE"
+    cp "$CACHE_FILE" "$2.tar.gz"
+  else
+    curl ${CURL_OPTIONS:+${CURL_OPTIONS}} -L "${URL}" -o $2.tar.gz
+    if tar -tzf "$2.tar.gz" >/dev/null 2>&1; then
+      cp "$2.tar.gz" "$CACHE_FILE"
+    fi
+  fi
   tar -xz --strip-components=1 -f $2.tar.gz
   popd
 }
@@ -202,6 +224,14 @@ function cmake_install {
 
 function setup_macos {
   sed -i '' '/run_and_time install_arrow/d' scripts/setup-macos.sh
+  # Skip 'update_brew' in the upstream Velox macOS setup script: brew is typically
+  # already installed and mirrors (e.g. Tsinghua) can be heavily queued, which stalls
+  # the whole build. Rely on the user's existing brew instead.
+  sed -i '' '/^  update_brew$/d' scripts/setup-macos.sh
+  # Make 'git apply' idempotent: if reverse-apply succeeds the patch is already
+  # applied, so skip re-applying (happens when a previous build failed mid-way
+  # and the dep's deps-download dir is preserved by PROMPT_ALWAYS_RESPOND=n).
+  sed -i '' 's|git apply \([^|&]*\)$|git apply --reverse --check \1 2>/dev/null \&\& echo "patch already applied, skipping" \|\| git apply \1|g' scripts/setup-common.sh
   if [ $ARCH == 'x86_64' ]; then
     ./scripts/setup-macos.sh
   elif [ $ARCH == 'arm64' ]; then

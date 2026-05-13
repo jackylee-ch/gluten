@@ -124,6 +124,18 @@ function build_arrow_java() {
 }
 
 echo "Start to build Arrow"
+# If Arrow's thirdparty tarballs have been pre-fetched into a local cache,
+# source the generated env file so CMake's ExternalProject (triggered both by
+# the Arrow CPP build and by the Arrow Java JNI build) uses the local
+# tarballs via ARROW_<DEP>_URL env vars instead of hitting github.com. Avoids
+# flaky-network re-downloads.
+ARROW_THIRDPARTY_ENV="${ARROW_THIRDPARTY_ENV:-$HOME/.cache/arrow-thirdparty/env.sh}"
+if [ -f "$ARROW_THIRDPARTY_ENV" ]; then
+  echo "Sourcing Arrow thirdparty env from $ARROW_THIRDPARTY_ENV"
+  set +u
+  source "$ARROW_THIRDPARTY_ENV"
+  set -u
+fi
 prepare_arrow_build
 build_arrow_cpp
 echo "Finished building arrow CPP"

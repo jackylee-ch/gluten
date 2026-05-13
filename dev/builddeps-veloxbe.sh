@@ -266,7 +266,7 @@ function build_gluten_cpp {
     GLUTEN_CMAKE_OPTIONS+=" -DCMAKE_CXX_FLAGS=-Wno-inconsistent-missing-override -Wno-macro-redefined"
   fi
 
-  cmake -G Ninja $GLUTEN_CMAKE_OPTIONS ..
+  CPM_SOURCE_CACHE=${GLUTEN_DIR}/.cpm-cache cmake -G Ninja $GLUTEN_CMAKE_OPTIONS ..
   ninja -j $NUM_THREADS
 }
 
