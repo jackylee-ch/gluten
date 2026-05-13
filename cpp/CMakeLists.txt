@@ -187,6 +187,44 @@ if(BUILD_TESTS)
   endif()
   include(GoogleTest)
   enable_testing()
+
+  # On macOS, /usr/local/include may contain a stale gtest installation that
+  # `/usr/bin/g++` searches ahead of the -isystem path added by GTest::gtest.
+  # That older header has `MakeAndRegisterTestInfo(const char*, ...)` while the
+  # homebrew libgtest.a used at link time has `(std::string, ...)`, which
+  # produces undefined-symbol link errors. Promote the gtest-specific include
+  # directory to a regular -I ahead of everything else. Resolve the real
+  # Cellar path (e.g. /opt/homebrew/Cellar/googletest/1.17.0/include) rather
+  # than /opt/homebrew/include, so we don't accidentally promote unrelated
+  # homebrew headers (fmt, etc.) that would shadow velox's deps-install copies.
+  if(CMAKE_SYSTEM_NAME MATCHES "Darwin" AND TARGET GTest::gtest)
+    # Clear INTERFACE_SYSTEM_INCLUDE_DIRECTORIES so GTest::gtest exposes the
+    # path as a normal -I instead of -isystem for targets that link it.
+    set_target_properties(GTest::gtest PROPERTIES
+                          INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "")
+    if(TARGET GTest::gtest_main)
+      set_target_properties(GTest::gtest_main PROPERTIES
+                            INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "")
+    endif()
+
+    get_target_property(_gluten_gtest_inc GTest::gtest
+                        INTERFACE_INCLUDE_DIRECTORIES)
+    set(_gluten_gtest_real_inc "")
+    if(_gluten_gtest_inc AND EXISTS "${_gluten_gtest_inc}/gtest/gtest.h")
+      get_filename_component(_gluten_gtest_real_hdr
+                             "${_gluten_gtest_inc}/gtest/gtest.h" REALPATH)
+      # gtest.h lives in .../include/gtest/gtest.h, so the include root is the
+      # grandparent of the resolved header.
+      get_filename_component(_gluten_gtest_real_dir
+                             "${_gluten_gtest_real_hdr}" DIRECTORY)
+      get_filename_component(_gluten_gtest_real_inc
+                             "${_gluten_gtest_real_dir}" DIRECTORY)
+    endif()
+    if(_gluten_gtest_real_inc AND EXISTS "${_gluten_gtest_real_inc}/gtest/gtest.h")
+      message(STATUS "Prepending GTest include dir: ${_gluten_gtest_real_inc}")
+      include_directories(BEFORE ${_gluten_gtest_real_inc})
+    endif()
+  endif()
 endif()
 
 function(ADD_TEST_CASE TEST_NAME)
