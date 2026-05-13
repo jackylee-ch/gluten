@@ -2,7 +2,23 @@ diff --git a/cpp/CMakeLists.txt b/cpp/CMakeLists.txt
 index d56f6a36d..9b4088df9 100644
 --- a/cpp/CMakeLists.txt
 +++ b/cpp/CMakeLists.txt
-@@ -773,8 +773,7 @@ if(ARROW_ORC)
+@@ -70,7 +70,15 @@
+ if(POLICY CMP0135)
+   cmake_policy(SET CMP0135 NEW)
+ endif()
+
++# Make IMPORTED targets' INTERFACE_INCLUDE_DIRECTORIES propagate as -I (user
++# include) rather than -isystem. On macOS Clang puts /usr/local/include first
++# in the system search path ahead of any -isystem flags, so stale headers
++# there (e.g. a root-owned /usr/local/include/re2/re2.h left from a previous
++# Velox build) would shadow Arrow's bundled deps. Using -I makes bundled
++# include dirs take priority over /usr/local/include.
++set(CMAKE_NO_SYSTEM_FROM_IMPORTED TRUE)
++
+ set(ARROW_VERSION "15.0.0")
+
+ string(REGEX MATCH "^[0-9]+\\.[0-9]+\\.[0-9]+" ARROW_BASE_VERSION "${ARROW_VERSION}")
+@@ -773,8 +781,7 @@ if(ARROW_ORC)
    list(APPEND ARROW_SHARED_LINK_LIBS orc::orc ${ARROW_PROTOBUF_LIBPROTOBUF})
    list(APPEND ARROW_STATIC_LINK_LIBS orc::orc ${ARROW_PROTOBUF_LIBPROTOBUF})
    if(ORC_SOURCE STREQUAL "SYSTEM")
@@ -12,7 +28,7 @@ index d56f6a36d..9b4088df9 100644
    endif()
  endif()
 
-@@ -823,9 +822,6 @@ if(ARROW_WITH_OPENTELEMETRY)
+@@ -823,9 +830,6 @@ if(ARROW_WITH_OPENTELEMETRY)
           opentelemetry-cpp::ostream_span_exporter
           opentelemetry-cpp::otlp_http_exporter)
    endif()
@@ -22,7 +38,7 @@ index d56f6a36d..9b4088df9 100644
    list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS CURL::libcurl)
  endif()
 
-@@ -860,6 +856,14 @@ if(ARROW_USE_XSIMD)
+@@ -860,6 +864,14 @@ if(ARROW_USE_XSIMD)
    list(APPEND ARROW_STATIC_LINK_LIBS ${ARROW_XSIMD})
  endif()
 
@@ -62,9 +78,9 @@ index a24f272fe..e25f78c85 100644
 --- a/cpp/src/arrow/c/helpers.h
 +++ b/cpp/src/arrow/c/helpers.h
 @@ -17,6 +17,7 @@
- 
+
  #pragma once
- 
+
 +#include <cassert>
  #include <stdio.h>
  #include <stdlib.h>
@@ -75,7 +91,7 @@ index d2d976677..d7dd01ecd 100644
 +++ b/java/dataset/src/main/cpp/jni_wrapper.cc
 @@ -126,20 +126,14 @@ class ReserveFromJava : public arrow::dataset::jni::ReservationListener {
        : vm_(vm), java_reservation_listener_(java_reservation_listener) {}
- 
+
    arrow::Status OnReservation(int64_t size) override {
 -    JNIEnv* env;
 -    if (vm_->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION) != JNI_OK) {
@@ -86,7 +102,7 @@ index d2d976677..d7dd01ecd 100644
      RETURN_NOT_OK(arrow::dataset::jni::CheckException(env));
      return arrow::Status::OK();
    }
- 
+
    arrow::Status OnRelease(int64_t size) override {
 -    JNIEnv* env;
 -    if (vm_->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION) != JNI_OK) {
@@ -133,3 +149,4 @@ index d2d976677..eb4b6d1d2 100644
 +#endif
    JNI_METHOD_END()
  }
+
