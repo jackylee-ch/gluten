@@ -34,6 +34,9 @@ function prepare_arrow_build() {
   patch -p1 < $CURRENT_DIR/../ep/build-velox/src/modify_arrow_dataset_scan_option.patch
   patch -p1 < $CURRENT_DIR/../ep/build-velox/src/cmake-compatibility.patch
   patch -p1 < $CURRENT_DIR/../ep/build-velox/src/support_ibm_power.patch
+  # Fix C++20 operator<< ambiguity in Arrow's vendored Howard Hinnant date
+  # library on macOS libc++ (sys_time overload conflicts with date::operator<<).
+  patch -p1 < $CURRENT_DIR/../ep/build-velox/src/fix_vendored_datetime_operator.patch
   popd
 }
 
