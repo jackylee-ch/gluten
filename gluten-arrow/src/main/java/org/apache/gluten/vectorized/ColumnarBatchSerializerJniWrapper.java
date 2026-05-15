@@ -51,6 +51,18 @@ public class ColumnarBatchSerializerJniWrapper implements RuntimeAware {
    */
   public native CachedBatchSerializeResult serializeWithStats(long batchHandle);
 
+  /**
+   * Serialize a single ColumnarBatch with per-column stats into a self-describing framed blob:
+   * {@code [magic(4)|statsLen(u32 LE)|statsBlob|bytesLen(u32 LE)|bytesBlob]}.
+   *
+   * <p>This is the compact alternative to {@link #serializeWithStats(long)} that produces a single
+   * byte[] containing both the serialized batch and the stats payload in one framed message.
+   *
+   * @param batchHandle native ColumnarBatch handle to serialize
+   * @return framed byte[] containing stats + serialized batch data
+   */
+  public native byte[] framedSerializeWithStats(long batchHandle);
+
   // Return the native ColumnarBatchSerializer handle
   public native long init(long cSchema);
 

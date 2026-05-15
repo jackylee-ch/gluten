@@ -19,6 +19,8 @@
 
 #include <arrow/c/abi.h>
 
+#include <vector>
+
 #include "memory/ColumnarBatch.h"
 
 namespace gluten {
@@ -59,6 +61,13 @@ class ColumnarBatchSerializer {
   // buffer (see `ColumnarBatchSerializerJniWrapper_serializeWithStats`).
   virtual const uint8_t* statsSerializedData() {
     return nullptr;
+  }
+
+  // Serialize a single batch with per-column stats into a self-describing
+  // framed blob: [magic(4)|statsLen(u32 LE)|statsBlob|bytesLen(u32 LE)|bytesBlob].
+  // Default returns empty vector (backend does not support framed stats).
+  virtual std::vector<uint8_t> framedSerializeWithStats(const std::shared_ptr<ColumnarBatch>& /*batch*/) {
+    return {};
   }
 
  protected:

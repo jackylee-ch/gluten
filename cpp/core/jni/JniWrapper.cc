@@ -1520,6 +1520,31 @@ Java_org_apache_gluten_vectorized_ColumnarBatchSerializerJniWrapper_serializeWit
   JNI_METHOD_END(nullptr)
 }
 
+JNIEXPORT jbyteArray JNICALL
+Java_org_apache_gluten_vectorized_ColumnarBatchSerializerJniWrapper_framedSerializeWithStats( // NOLINT
+    JNIEnv* env,
+    jobject wrapper,
+    jlong batchHandle) {
+  JNI_METHOD_START
+  auto ctx = getRuntime(env, wrapper);
+
+  auto batch = ObjectStore::retrieve<ColumnarBatch>(batchHandle);
+  GLUTEN_DCHECK(batch != nullptr, "Cannot find the ColumnarBatch with handle " + std::to_string(batchHandle));
+
+  auto serializer = ctx->createColumnarBatchSerializer(nullptr);
+  auto framedBytes = serializer->framedSerializeWithStats(batch);
+  GLUTEN_CHECK(!framedBytes.empty(), "framedSerializeWithStats returned empty payload");
+
+  jbyteArray result = env->NewByteArray(static_cast<jsize>(framedBytes.size()));
+  checkException(env);
+  GLUTEN_CHECK(result != nullptr, "Failed to allocate byte[] for framed stats payload");
+  env->SetByteArrayRegion(
+      result, 0, static_cast<jsize>(framedBytes.size()), reinterpret_cast<const jbyte*>(framedBytes.data()));
+  checkException(env);
+  return result;
+  JNI_METHOD_END(nullptr)
+}
+
 JNIEXPORT jlong JNICALL Java_org_apache_gluten_vectorized_ColumnarBatchSerializerJniWrapper_init( // NOLINT
     JNIEnv* env,
     jobject wrapper,

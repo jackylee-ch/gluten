@@ -768,20 +768,20 @@ class ColumnarCachedBatchSerializer extends SimpleMetricsCachedBatchSerializer w
             val batch = veloxBatches.next()
             val handle = ColumnarBatches.getNativeHandle(BackendsApiManager.getBackendName, batch)
             if (collectStats) {
-              val result = jniWrapper.serializeWithStats(handle)
-              val statsBytes = result.getStats
-              // `toByteArray` has an internal try/finally that releases the
-              // off-heap ArrowBuf on every exit path (including OOM allocating
-              // the on-heap destination array). Call it FIRST, before any
-              // Scala-side work (decodeStats, row allocation) that could
-              // throw; that way the on-heap `bytes` materializes and the
-              // buffer releases as a single atomic step with no leak window.
-              val bytes = result.getData.toByteArray
-              val stats = ColumnarCachedBatchSerializer.decodeStats(statsBytes, cacheSchema)
-              val statsSize = if (statsBytes == null) 0 else statsBytes.length
+              val framedBytes = jniWrapper.framedSerializeWithStats(handle)
+              val parsed =
+                ColumnarCachedBatchSerializer.parseFramedBytes(framedBytes)
+              val stats = if (parsed != null) {
+                ColumnarCachedBatchSerializer.decodeFramedStats(
+                  parsed._1,
+                  cacheSchema)
+              } else {
+                null
+              }
+              val bytes = if (parsed != null) parsed._2 else framedBytes
               CachedColumnarBatch(
                 batch.numRows(),
-                bytes.length.toLong + statsSize.toLong,
+                bytes.length.toLong,
                 bytes,
                 stats)
             } else {
@@ -1247,6 +1247,12 @@ object ColumnarCachedBatchSerializer extends Logging {
       // TimestampNTZType present in Spark 3.4+; match via catalog string to
       // stay compilable across shims.
       Some((java.lang.Long.MIN_VALUE, java.lang.Long.MAX_VALUE))
+    case dt if dt.catalogString.startsWith("interval year") =>
+      // YearMonthIntervalType: physical storage is Int32.
+      Some((java.lang.Integer.MIN_VALUE, java.lang.Integer.MAX_VALUE))
+    case dt if dt.catalogString.startsWith("interval day") =>
+      // DayTimeIntervalType: physical storage is Int64.
+      Some((java.lang.Long.MIN_VALUE, java.lang.Long.MAX_VALUE))
     case _ =>
       // Exotic/unsupported atomic types (YearMonthIntervalType etc.) that
       // Spark's buildFilter may in theory push down. Return None so the
@@ -1417,6 +1423,226 @@ object ColumnarCachedBatchSerializer extends Logging {
         }
       case _ => false
     }
+  }
+
+  // Framed wire format magic: 0xFE 0xCA 0x53 0x02 (little-endian u32).
+  private val FRAMED_MAGIC: Int = 0x0253cafe
+
+  /**
+   * Parse the framed wire format produced by C++ `framedSerializeWithStats`: [magic(4)|statsLen(u32
+   * LE)|statsBlob|bytesLen(u32 LE)|bytesBlob].
+   *
+   * Returns (statsBlob, bytesBlob) on success, or null if the payload is malformed (wrong magic,
+   * truncated, etc.).
+   */
+  private[execution] def parseFramedBytes(
+      framed: Array[Byte]): (Array[Byte], Array[Byte]) = {
+    if (framed == null || framed.length < 12) return null
+    val buf = ByteBuffer.wrap(framed).order(ByteOrder.LITTLE_ENDIAN)
+    val magic = buf.getInt
+    if (magic != FRAMED_MAGIC) return null
+    val statsLen = buf.getInt
+    if (statsLen < 0 || statsLen > buf.remaining()) return null
+    val statsBlob = new Array[Byte](statsLen)
+    buf.get(statsBlob)
+    if (buf.remaining() < 4) return null
+    val bytesLen = buf.getInt
+    if (bytesLen < 0 || bytesLen > buf.remaining()) return null
+    val bytesBlob = new Array[Byte](bytesLen)
+    buf.get(bytesBlob)
+    (statsBlob, bytesBlob)
+  }
+
+  /**
+   * Decode the framed stats blob into an InternalRow matching PartitionStatistics.schema:
+   * per-column [lower, upper, nullCount, rowCount, sizeInBytes].
+   *
+   * The statsBlob format (all little-endian): numCols: u32 per-column: supported: u8 (1=bounds
+   * present, 0=no bounds) nullCount: u32 rowCount: u32 sizeInBytes: u64 if supported: lowerLen:
+   * u32, lowerBytes[lowerLen] upperLen: u32, upperBytes[upperLen]
+   */
+  private[execution] def decodeFramedStats(
+      statsBlob: Array[Byte],
+      schema: StructType): InternalRow = {
+    if (statsBlob == null || statsBlob.length < 4) return null
+    try {
+      val buf = ByteBuffer.wrap(statsBlob).order(ByteOrder.LITTLE_ENDIAN)
+      val numCols = buf.getInt
+      if (numCols <= 0 || numCols > MAX_STATS_COLUMNS) return null
+      if (numCols != schema.length) {
+        sampledWarn(
+          "framed-numCols-mismatch",
+          s"Framed stats numCols=$numCols != schema length=${schema.length}")
+        return null
+      }
+      val values = new Array[Any](numCols * 5)
+      var col = 0
+      while (col < numCols) {
+        val supported = buf.get() != 0
+        val rawNullCount = buf.getInt
+        val rawRowCount = buf.getInt
+        val sizeInBytes = buf.getLong
+        val dataType = schema(col).dataType
+        val (lower, upper) = if (supported) {
+          val lowerLen = buf.getInt
+          if (lowerLen < 0 || lowerLen > MAX_STATS_STRING_LEN) {
+            return null
+          }
+          val lowerBytes = new Array[Byte](lowerLen)
+          buf.get(lowerBytes)
+          val upperLen = buf.getInt
+          if (upperLen < 0 || upperLen > MAX_STATS_STRING_LEN) {
+            return null
+          }
+          val upperBytes = new Array[Byte](upperLen)
+          buf.get(upperBytes)
+          val decoded = decodeFramedBounds(lowerBytes, upperBytes, dataType)
+          if (decoded == null) {
+            val opt = tautologicalBoundsFor(dataType)
+            if (opt.isEmpty) return null else opt.get
+          } else {
+            decoded
+          }
+        } else {
+          val opt = tautologicalBoundsFor(dataType)
+          if (opt.isEmpty) return null else opt.get
+        }
+        val (nullCount, rowCount) =
+          if (rawRowCount == Int.MaxValue || rawNullCount == Int.MaxValue) {
+            (
+              java.lang.Integer.valueOf(1),
+              java.lang.Integer.valueOf(Int.MaxValue))
+          } else {
+            (
+              java.lang.Integer.valueOf(rawNullCount),
+              java.lang.Integer.valueOf(rawRowCount))
+          }
+        val base = col * 5
+        values(base) = lower
+        values(base + 1) = upper
+        values(base + 2) = nullCount
+        values(base + 3) = rowCount
+        values(base + 4) = java.lang.Long.valueOf(sizeInBytes)
+        col += 1
+      }
+      new GenericInternalRow(values)
+    } catch {
+      case e @ (_: java.nio.BufferUnderflowException |
+          _: IllegalArgumentException |
+          _: NegativeArraySizeException) =>
+        sampledWarn(
+          "framed-corrupt",
+          "Framed stats payload is corrupt; skipping filter pushdown.",
+          e)
+        null
+    }
+  }
+
+  /**
+   * Decode raw little-endian bound bytes into typed Scala values based on the schema DataType.
+   * Returns (lower, upper) or null if the type is unsupported or bounds are inverted.
+   */
+  private def decodeFramedBounds(
+      lowerBytes: Array[Byte],
+      upperBytes: Array[Byte],
+      dataType: DataType): (Any, Any) = {
+    val loBuf = ByteBuffer.wrap(lowerBytes).order(ByteOrder.LITTLE_ENDIAN)
+    val hiBuf = ByteBuffer.wrap(upperBytes).order(ByteOrder.LITTLE_ENDIAN)
+    dataType match {
+      case BooleanType =>
+        if (lowerBytes.length < 1 || upperBytes.length < 1) return null
+        val lo = loBuf.get() != 0
+        val hi = hiBuf.get() != 0
+        if (lo && !hi) null else (lo, hi)
+      case ByteType =>
+        if (lowerBytes.length < 1 || upperBytes.length < 1) return null
+        val lo = loBuf.get()
+        val hi = hiBuf.get()
+        if (lo > hi) null else (lo, hi)
+      case ShortType =>
+        if (lowerBytes.length < 2 || upperBytes.length < 2) return null
+        val lo = loBuf.getShort
+        val hi = hiBuf.getShort
+        if (lo > hi) null else (lo, hi)
+      case IntegerType | DateType =>
+        if (lowerBytes.length < 4 || upperBytes.length < 4) return null
+        val lo = loBuf.getInt
+        val hi = hiBuf.getInt
+        if (lo > hi) null else (lo, hi)
+      case LongType | TimestampType =>
+        if (lowerBytes.length < 8 || upperBytes.length < 8) return null
+        val lo = loBuf.getLong
+        val hi = hiBuf.getLong
+        if (lo > hi) null else (lo, hi)
+      case FloatType =>
+        if (lowerBytes.length < 4 || upperBytes.length < 4) return null
+        val lo = loBuf.getFloat
+        val hi = hiBuf.getFloat
+        if (lo.isNaN || hi.isNaN || lo > hi) null else (lo, hi)
+      case DoubleType =>
+        if (lowerBytes.length < 8 || upperBytes.length < 8) return null
+        val lo = loBuf.getDouble
+        val hi = hiBuf.getDouble
+        if (lo.isNaN || hi.isNaN || lo > hi) null else (lo, hi)
+      case dt: DecimalType if dt.precision <= 18 =>
+        if (lowerBytes.length < 8 || upperBytes.length < 8) return null
+        val lo = loBuf.getLong
+        val hi = hiBuf.getLong
+        if (lo > hi) null
+        else (
+          Decimal(lo, dt.precision, dt.scale),
+          Decimal(hi, dt.precision, dt.scale))
+      case dt: DecimalType =>
+        // Long decimal (precision > 18): 16-byte int128 LE
+        if (lowerBytes.length < 16 || upperBytes.length < 16) return null
+        val lo = readI128LE(loBuf)
+        val hi = readI128LE(hiBuf)
+        if (lo.compareTo(hi) > 0) null
+        else {
+          val loDec = new java.math.BigDecimal(lo, dt.scale)
+          val hiDec = new java.math.BigDecimal(hi, dt.scale)
+          (
+            Decimal(loDec, dt.precision, dt.scale),
+            Decimal(hiDec, dt.precision, dt.scale))
+        }
+      case _: StringType =>
+        if (compareUnsignedBytes(lowerBytes, upperBytes) > 0) null
+        else (
+          UTF8String.fromBytes(lowerBytes),
+          UTF8String.fromBytes(upperBytes))
+      case dt if dt.catalogString == "timestamp_ntz" =>
+        if (lowerBytes.length < 8 || upperBytes.length < 8) return null
+        val lo = loBuf.getLong
+        val hi = hiBuf.getLong
+        if (lo > hi) null else (lo, hi)
+      case dt if dt.catalogString.startsWith("interval year") =>
+        // YearMonthIntervalType: physical Int32
+        if (lowerBytes.length < 4 || upperBytes.length < 4) return null
+        val lo = loBuf.getInt
+        val hi = hiBuf.getInt
+        if (lo > hi) null else (lo, hi)
+      case dt if dt.catalogString.startsWith("interval day") =>
+        // DayTimeIntervalType: physical Int64
+        if (lowerBytes.length < 8 || upperBytes.length < 8) return null
+        val lo = loBuf.getLong
+        val hi = hiBuf.getLong
+        if (lo > hi) null else (lo, hi)
+      case _ => null
+    }
+  }
+
+  /** Read a 16-byte little-endian int128 as a BigInteger. */
+  private def readI128LE(buf: ByteBuffer): java.math.BigInteger = {
+    val bytes = new Array[Byte](16)
+    buf.get(bytes)
+    // Convert from LE to big-endian (BigInteger expects BE, sign-magnitude)
+    val be = new Array[Byte](16)
+    var i = 0
+    while (i < 16) {
+      be(i) = bytes(15 - i)
+      i += 1
+    }
+    new java.math.BigInteger(be)
   }
 }
 

@@ -23,8 +23,17 @@
 #include "operators/serializer/BatchStatsCollector.h"
 #include "operators/serializer/ColumnarBatchSerializer.h"
 #include "velox/serializers/PrestoSerializer.h"
+#include "velox/type/Variant.h"
 
 namespace gluten {
+
+struct FramedColumnStats {
+  bool hasLowerBound{false};
+  bool hasUpperBound{false};
+  facebook::velox::variant lowerBound;
+  facebook::velox::variant upperBound;
+  int64_t nullCount{0};
+};
 
 class VeloxColumnarBatchSerializer : public ColumnarBatchSerializer {
  public:
@@ -73,6 +82,13 @@ class VeloxColumnarBatchSerializer : public ColumnarBatchSerializer {
   // nullptr if the cache is empty. Exposed so the JNI layer can copy directly
   // into a Java byte[] without an intermediate std::vector.
   const uint8_t* statsSerializedData() override;
+
+  // Compact stats path: compute per-column min/max/nullCount and serialize
+  // the batch + stats into a single framed blob. This is an alternative to
+  // the enableStatsCollection/append/statsSerializedSize/serializeStatsTo
+  // protocol that produces the same logical output in a simpler API.
+  std::vector<FramedColumnStats> computeStats(facebook::velox::RowVectorPtr rowVector);
+  std::vector<uint8_t> framedSerializeWithStats(const std::shared_ptr<ColumnarBatch>& batch) override;
 
  private:
   // Populate `statsBytes_` from `statsCollector_->toBytes()` if the cache is
