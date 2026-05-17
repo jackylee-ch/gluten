@@ -293,6 +293,18 @@ endif()
 
 target_link_libraries(velox PUBLIC gluten)
 
+# On Darwin, propagate google::glog's INTERFACE_LINK_OPTIONS
+# (LINKER:-load_hidden for libglog.a and libgflags.a) through libvelox.dylib to
+# all downstream consumers (test binaries, benchmarks). Without this,
+# Folly::folly's INTERFACE_LINK_LIBRARIES pulls libgflags.a/libglog.a into
+# libvelox.dylib and test binaries with default visibility, so their
+# FlagRegistry::GlobalRegistry function-local statics coalesce with
+# libgluten.dylib's copy and gflags aborts with "flag 'flagfile' linked both
+# statically and dynamically" at startup.
+if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
+  target_link_libraries(velox PUBLIC google::glog)
+endif()
+
 # Requires VELOX_MONO_LIBRARY=ON when building Velox.
 import_library(facebook::velox ${VELOX_BUILD_PATH}/lib/libvelox.a)
 
