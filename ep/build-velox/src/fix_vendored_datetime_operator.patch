@@ -1,0 +1,37 @@
+Fix C++20 operator<< ambiguity in Arrow's vendored Howard Hinnant date library.
+
+On macOS libc++ with -std=c++20, std::chrono's own operator<< for sys_time
+overloads conflict with the vendored `date::operator<<` pulled in via
+`using date::operator<<` / `using namespace date`, producing an ambiguous
+overload resolution error when streaming sys_seconds/sys_time values.
+
+Replace the ADL-driven `<<` call sites with an explicit qualified call
+`date::operator<<(os, timepoint)` so the vendored overload is selected
+unambiguously regardless of what std::chrono provides.
+
+diff --git a/cpp/src/arrow/vendored/datetime/tz.cpp b/cpp/src/arrow/vendored/datetime/tz.cpp
+--- a/cpp/src/arrow/vendored/datetime/tz.cpp
++++ b/cpp/src/arrow/vendored/datetime/tz.cpp
+@@ -2734,8 +2734,7 @@
+ std::ostream&
+ operator<<(std::ostream& os, const leap_second& x)
+ {
+-    using namespace date;
+-    return os << x.date_ << "  +";
++    return date::operator<<(os, x.date_) << "  +";
+ }
+
+ #if USE_OS_TZDB
+diff --git a/cpp/src/arrow/vendored/datetime/tz_private.h b/cpp/src/arrow/vendored/datetime/tz_private.h
+--- a/cpp/src/arrow/vendored/datetime/tz_private.h
++++ b/cpp/src/arrow/vendored/datetime/tz_private.h
+@@ -291,8 +291,7 @@
+     std::ostream&
+     operator<<(std::ostream& os, const transition& t)
+     {
+-        using date::operator<<;
+-        os << t.timepoint << "Z ";
++        date::operator<<(os, t.timepoint) << "Z ";
+         if (t.info->offset >= std::chrono::seconds{0})
+             os << '+';
+         os << make_time(t.info->offset);
