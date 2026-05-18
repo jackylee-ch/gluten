@@ -259,6 +259,11 @@ function build_gluten_cpp {
 
   if [ $OS == 'Darwin' ]; then
     GLUTEN_CMAKE_OPTIONS+=" -DCMAKE_PREFIX_PATH=$INSTALL_PREFIX"
+    GLUTEN_CMAKE_OPTIONS+=" -DCMAKE_NO_SYSTEM_FROM_IMPORTED=ON"
+    GLUTEN_CMAKE_OPTIONS+=" -DCMAKE_IGNORE_PREFIX_PATH=/usr/local"
+    GLUTEN_CMAKE_OPTIONS+=" -DCMAKE_IGNORE_PATH=/usr/local;/usr/local/include;/usr/local/lib;/usr/local/lib/cmake"
+    GLUTEN_CMAKE_OPTIONS+=" -DCMAKE_SYSTEM_IGNORE_PATH=/usr/local;/usr/local/include;/usr/local/lib;/usr/local/lib/cmake"
+    GLUTEN_CMAKE_OPTIONS+=" -DCMAKE_CXX_FLAGS=-Wno-inconsistent-missing-override -Wno-macro-redefined"
   fi
 
   cmake -G Ninja $GLUTEN_CMAKE_OPTIONS ..
