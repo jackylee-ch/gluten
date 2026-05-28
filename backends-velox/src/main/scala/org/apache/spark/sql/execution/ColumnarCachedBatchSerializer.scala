@@ -23,6 +23,7 @@ import org.apache.gluten.execution.{RowToVeloxColumnarExec, VeloxColumnarToRowEx
 import org.apache.gluten.iterator.Iterators
 import org.apache.gluten.memory.arrow.alloc.ArrowBufferAllocators
 import org.apache.gluten.runtime.Runtimes
+import org.apache.gluten.sql.shims.SparkShimLoader
 import org.apache.gluten.utils.ArrowAbiUtil
 import org.apache.gluten.vectorized.ColumnarBatchSerializerJniWrapper
 
@@ -31,8 +32,10 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.Kryo.KRYO_SERIALIZER_MAX_BUFFER_SIZE
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, GenericInternalRow}
-import org.apache.spark.sql.columnar.{CachedBatch, SimpleMetricsCachedBatch, SimpleMetricsCachedBatchSerializer}
+import org.apache.spark.sql.catalyst.expressions.{And, Attribute, Expression, ExprId}
+import org.apache.spark.sql.catalyst.expressions.{GenericInternalRow, PredicateHelper}
+import org.apache.spark.sql.columnar.{CachedBatch, SimpleMetricsCachedBatch}
+import org.apache.spark.sql.columnar.SimpleMetricsCachedBatchSerializer
 import org.apache.spark.sql.execution.columnar.DefaultCachedBatchSerializer
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
@@ -41,7 +44,7 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.unsafe.types.UTF8String
 
-import com.esotericsoftware.kryo.{Kryo, Serializer => KryoSerializer}
+import com.esotericsoftware.kryo.{Kryo, KryoException, Serializer => KryoSerializer}
 import com.esotericsoftware.kryo.DefaultSerializer
 import com.esotericsoftware.kryo.io.{Input, Output}
 import org.apache.arrow.c.ArrowSchema
@@ -149,14 +152,30 @@ class CachedColumnarBatchKryoSerializer extends KryoSerializer[CachedColumnarBat
     )
     val bytes = new Array[Byte](payloadLen)
     input.readBytes(bytes)
-    // Backward-compat with the V1 wire format (no trailing hasStats / hasSchema booleans):
-    // legacy CachedColumnarBatch instances persisted on disk (DISK_ONLY / MEMORY_AND_DISK)
-    // surviving a rolling upgrade lack these fields. available() is best-effort -- treats
-    // unavailable suffix as "absent" instead of throwing KryoException.
-    val hasStats = input.available() > 0 && input.readBoolean()
-    // Even when hasStats=false we still consume the hasSchema tag to keep the stream aligned.
-    // NB: avoid `val (a: T, b: U) = ...` -- Scala 2.13 erases Tuple2 generics and the typed
-    // pattern match throws MatchError at runtime.
+    // Read the trailing hasStats marker. Catching a Buffer-underflow KryoException
+    // here preserves backward compatibility with the V1 wire format (no trailing
+    // hasStats / hasSchema booleans), which the existing
+    // ColumnarCachedBatchKryoSuite#"V1 wire ..." test locks as a contract:
+    // an absent trailing byte must read as null, not throw.
+    //
+    // Why a try/catch instead of `input.available() > 0 && readBoolean`:
+    // Kryo `Input.available()` returns `(limit - position) + underlyingStream.available()`,
+    // and the JDK `InputStream.available()` contract permits any implementation to
+    // return 0 even when more data follows -- BufferedInputStream over shuffle-spill
+    // / network chunk boundaries routinely does so. When the Kryo buffer is drained
+    // AND the underlying stream reports 0 at the trailing-boolean byte position, the
+    // probe falsely concludes EOF, skips hasStats, and the next readClassAndObject
+    // interprets the stats payload (which contains the schema JSON) as a class name --
+    // surfacing as `ClassNotFoundException: {"type":"struct",...}` with the stack
+    // topped by `DefaultClassResolver.readName`. A try/catch on the real EOF surface
+    // (Kryo "Buffer underflow") avoids the false-EOF probe while still tolerating
+    // V1 wire.
+    //
+    // NB: avoid `val (a: T, b: U) = ...` -- Scala 2.13 erases Tuple2 generics and the
+    // typed pattern match throws MatchError at runtime.
+    val hasStats =
+      try input.readBoolean()
+      catch { case e: KryoException if isBufferUnderflow(e) => false }
     val statsAndSchema: (InternalRow, StructType) = if (hasStats) {
       val statsLen = input.readInt()
       require(
@@ -174,9 +193,21 @@ class CachedColumnarBatchKryoSerializer extends KryoSerializer[CachedColumnarBat
     CachedColumnarBatch(numRows, sizeInBytes, bytes, statsAndSchema._1, statsAndSchema._2)
   }
 
+  // Kryo signals end-of-input by throwing KryoException with a message starting
+  // with "Buffer underflow". There is no dedicated subclass, so a message-prefix
+  // check is the narrowest filter we can apply without swallowing real corruption
+  // (e.g. ClassNotFoundException wrapped during readClassAndObject).
+  private def isBufferUnderflow(e: KryoException): Boolean = {
+    val msg = e.getMessage
+    msg != null && msg.startsWith("Buffer underflow")
+  }
+
   private def readOptionalSchema(input: Input, maxLen: Long): StructType = {
-    // Treat absent trailing bytes as "no schema": V1 wire format predates this field.
-    if (input.available() <= 0 || !input.readBoolean()) {
+    // Trailing schema marker. See readSchema above for the same V1-vs-chunked-fill rationale.
+    val hasSchema =
+      try input.readBoolean()
+      catch { case e: KryoException if isBufferUnderflow(e) => false }
+    if (!hasSchema) {
       null
     } else {
       val schemaLen = input.readInt()
@@ -243,7 +274,12 @@ object CachedColumnarBatchKryoSerializer {
       case FloatType => true // 4B IEEE 754; NaN guard in cpp scanMinMax
       case DoubleType => true // 8B IEEE 754; NaN guard in cpp scanMinMax
       case BooleanType => true
-      case _: StringType => true // truncated to 256B; see encodeStringBounds (any collation)
+      case s: StringType if SparkShimLoader.getSparkShims.isBinaryCollationString(s) => true
+      // Non-binary collation: cpp scanMinMax byte-order disagrees with Spark's
+      // collation-aware String ordering at runtime (PhysicalStringType.ordering
+      // dispatches to CollationFactory.fetchCollation(id).comparator). Demote to
+      // supported=0; the buildFilter wrapper strips any AND-conjunct that
+      // references such columns to guarantee pass-through.
       case _ => false
     }
 
@@ -612,7 +648,8 @@ object CachedColumnarBatchKryoSerializer {
  * Velox columnar cache serializer. Supports column pruning; converts row-based input via
  * [[RowToVeloxColumnarExec]] and falls back to vanilla Spark serialization for unsupported schemas.
  */
-class ColumnarCachedBatchSerializer extends SimpleMetricsCachedBatchSerializer {
+class ColumnarCachedBatchSerializer extends SimpleMetricsCachedBatchSerializer
+  with PredicateHelper {
   private lazy val rowBasedCachedBatchSerializer = new DefaultCachedBatchSerializer
 
   private def glutenConf: GlutenConfig = GlutenConfig.get
@@ -703,30 +740,32 @@ class ColumnarCachedBatchSerializer extends SimpleMetricsCachedBatchSerializer {
              if heavy batch is encountered */
           batch => VeloxColumnarBatches.ensureVeloxBatch(batch)
         }
-        // Hoist the per-partition StructType out of the per-batch hot path: schema is constant
-        // for the lifetime of this iterator, so allocating one StructType per CachedBatch wastes
-        // GC for the many-small-batch case.
+        // Hoist per-partition-iterator constants out of the per-batch hot path:
+        // schema, backend name, partition-stats conf, and the JNI wrapper are all
+        // fixed for the lifetime of this iterator. Allocating them per CachedBatch
+        // wastes GC in the many-small-batch case; GlutenConfig.get in particular
+        // allocates a fresh GlutenConfig(SQLConf.get) on every call.
         val structSchema = StructType(
           schema.map(a => StructField(a.name, a.dataType, a.nullable)))
+        val backendName = BackendsApiManager.getBackendName
+        val partitionStatsEnabled =
+          GlutenConfig.get.getConf(GlutenConfig.COLUMNAR_TABLE_CACHE_PARTITION_STATS_ENABLED)
+        val jni = ColumnarBatchSerializerJniWrapper.create(
+          Runtimes.contextInstance(
+            backendName,
+            "ColumnarCachedBatchSerializer#serialize"))
         new Iterator[CachedBatch] {
           override def hasNext: Boolean = veloxBatches.hasNext
 
           override def next(): CachedBatch = {
             val batch = veloxBatches.next()
-            val jni = ColumnarBatchSerializerJniWrapper.create(
-              Runtimes.contextInstance(
-                BackendsApiManager.getBackendName,
-                "ColumnarCachedBatchSerializer#serialize"))
-            val handle =
-              ColumnarBatches.getNativeHandle(BackendsApiManager.getBackendName, batch)
+            val handle = ColumnarBatches.getNativeHandle(backendName, batch)
             // Route through serializeWithStats when the partition-stats conf is enabled and the
             // JNI extension is linked in libgluten.so. Capability is detected lazily at the
             // call site: a new Gluten jar paired with an older native library will throw
             // UnsatisfiedLinkError on the first invocation; we catch it once, cache the
             // result, and fall back to the legacy serialize() path emitting stats=null. The
             // buildFilter wrapper directs such batches through without pruning.
-            val partitionStatsEnabled =
-              GlutenConfig.get.getConf(GlutenConfig.COLUMNAR_TABLE_CACHE_PARTITION_STATS_ENABLED)
             if (partitionStatsEnabled && ColumnarCachedBatchSerializer.statsExtAvailable) {
               try {
                 val framed = jni.serializeWithStats(handle)
@@ -840,11 +879,49 @@ class ColumnarCachedBatchSerializer extends SimpleMetricsCachedBatchSerializer {
   // split, vanilla SimpleMetricsCachedBatchSerializer.buildFilter NPEs on
   // partitionFilter.eval(null) for non-trivial predicates -- the codegen and interpreted
   // paths both have no fallback for null stats.
+  //
+  // Strip every AND-conjunct that references a non-binary collation StringType attribute
+  // (writer-side gate demoted those columns to supported=0; the cpp byte-order min/max
+  // bytes do not agree with collation-aware String ordering at runtime, so feeding such
+  // a conjunct to super.buildFilter would let the stats-bound check wrongly prune).
+  // Or sub-trees are left intact; one disjunct losing stats already loses the Or anyway.
+  private def stripUnsupportedConjuncts(
+      predicates: Seq[Expression],
+      cachedAttributes: Seq[Attribute]): Seq[Expression] = {
+    val skipAttrIds: Set[ExprId] = cachedAttributes.collect {
+      case a if (a.dataType match {
+            case s: StringType => !SparkShimLoader.getSparkShims.isBinaryCollationString(s)
+            case _ => false
+          }) =>
+        a.exprId
+    }.toSet
+    if (skipAttrIds.isEmpty) {
+      predicates
+    } else {
+      predicates.flatMap {
+        p =>
+          val conjuncts = splitConjunctivePredicates(p)
+          val kept = conjuncts.filterNot(
+            c =>
+              c.references.exists(r => skipAttrIds.contains(r.exprId)))
+          if (kept.isEmpty) None else Some(kept.reduce(And))
+      }
+    }
+  }
+
   override def buildFilter(
       predicates: Seq[Expression],
       cachedAttributes: Seq[Attribute])
       : (Int, Iterator[CachedBatch]) => Iterator[CachedBatch] = {
-    val parent = super.buildFilter(predicates, cachedAttributes)
+    // cachedAttributes carries the cached relation's output ExprIds (the underlying scan
+    // attributes), so ExprId-based matching is stable here -- no aliased ExprIds reach
+    // this layer. Stripping is intentionally done before super.buildFilter sees the
+    // predicate vector; empty filteredPredicates degrade gracefully because
+    // super reduces partitionFilters with .reduceOption(And).getOrElse(Literal(true))
+    // -- verified against spark-sql_2.13-4.0.1-sources CachedBatchSerializer.scala.
+    val parent = super.buildFilter(
+      stripUnsupportedConjuncts(predicates, cachedAttributes),
+      cachedAttributes)
     (index, cachedBatchIterator) =>
       new Iterator[CachedBatch] {
         private val peekable = cachedBatchIterator.buffered

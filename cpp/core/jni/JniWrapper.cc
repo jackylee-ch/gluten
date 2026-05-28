@@ -277,7 +277,7 @@ jint JNI_OnLoad(JavaVM* vm, void* reserved) {
       env,
       metricsBuilderClass,
       "<init>",
-      "([J[J[J[J[J[J[J[J[J[JJ[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[JLjava/lang/String;)V");
+      "([J[J[J[J[J[J[J[J[J[JJ[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[J[JLjava/lang/String;)V");
 
   nativeColumnarToRowInfoClass =
       createGlobalClassReferenceOrError(env, "Lorg/apache/gluten/vectorized/NativeColumnarToRowInfo;");
@@ -595,6 +595,7 @@ JNIEXPORT jobject JNICALL Java_org_apache_gluten_metrics_IteratorMetricsJniWrapp
       longArray[Metrics::kNumReplacedWithDynamicFilterRows],
       longArray[Metrics::kNumDynamicFilterInputRows],
       longArray[Metrics::kFlushRowCount],
+      longArray[Metrics::kAbandonedPartialAggregationRows],
       longArray[Metrics::kLoadedToValueHook],
       longArray[Metrics::kBloomFilterBlocksByteSize],
       longArray[Metrics::kScanTime],
@@ -990,6 +991,7 @@ JNIEXPORT jlong JNICALL Java_org_apache_gluten_vectorized_ShuffleWriterJniWrappe
     jint startPartitionId,
     jint splitBufferSize,
     jdouble splitBufferReallocThreshold,
+    jint partitionBufferEvictThreshold,
     jlong partitionWriterHandle) {
   JNI_METHOD_START
   const auto ctx = getRuntime(env, wrapper);
@@ -1004,7 +1006,8 @@ JNIEXPORT jlong JNICALL Java_org_apache_gluten_vectorized_ShuffleWriterJniWrappe
       toPartitioning(jStringToCString(env, partitioningNameJstr)),
       startPartitionId,
       splitBufferSize,
-      splitBufferReallocThreshold);
+      splitBufferReallocThreshold,
+      partitionBufferEvictThreshold);
 
   return ctx->saveObject(ctx->createShuffleWriter(numPartitions, partitionWriter, shuffleWriterOptions));
   JNI_METHOD_END(kInvalidObjectHandle)
