@@ -178,10 +178,14 @@ function cmake_install {
 
   local MACOS_ISOLATION_FLAGS=""
   if [[ "$(uname)" == "Darwin" ]]; then
-    MACOS_ISOLATION_FLAGS="-DCMAKE_NO_SYSTEM_FROM_IMPORTED=ON \
-      -DCMAKE_IGNORE_PREFIX_PATH=/usr/local \
-      -DCMAKE_IGNORE_PATH=/usr/local;/usr/local/include;/usr/local/lib;/usr/local/lib/cmake \
-      -DCMAKE_SYSTEM_IGNORE_PATH=/usr/local;/usr/local/include;/usr/local/lib;/usr/local/lib/cmake"
+    if [[ "${INSTALL_PREFIX:-}" == "/usr/local" || "${INSTALL_PREFIX:-}" == /usr/local/* ]]; then
+      echo "INFO: INSTALL_PREFIX=${INSTALL_PREFIX} is under /usr/local; keeping /usr/local visible to CMake." >&2
+    else
+      MACOS_ISOLATION_FLAGS="-DCMAKE_NO_SYSTEM_FROM_IMPORTED=ON \
+        -DCMAKE_IGNORE_PREFIX_PATH=/usr/local \
+        -DCMAKE_IGNORE_PATH=/usr/local;/usr/local/include;/usr/local/lib;/usr/local/lib/cmake \
+        -DCMAKE_SYSTEM_IGNORE_PATH=/usr/local;/usr/local/include;/usr/local/lib;/usr/local/lib/cmake"
+    fi
   fi
 
   # CMAKE_POSITION_INDEPENDENT_CODE is required so that Velox can be built into dynamic libraries \
