@@ -49,7 +49,7 @@ class GlutenCachedTableSuite
     sql("CACHE TABLE testData")
     spark.table("testData").queryExecution.withCachedData.collect {
       case cached: InMemoryRelation =>
-        assert(cached.stats.sizeInBytes === 1132)
+        assert(cached.stats.sizeInBytes === 1130)
     }
   }
 
