@@ -87,14 +87,36 @@ void veloxMemoryManagerReleaser(MemoryManager* memoryManager) {
 Runtime* veloxRuntimeFactory(
     const std::string& kind,
     MemoryManager* memoryManager,
+    ThreadManager* threadManager,
     const std::unordered_map<std::string, std::string>& sessionConf) {
   auto* vmm = dynamic_cast<VeloxMemoryManager*>(memoryManager);
   GLUTEN_CHECK(vmm != nullptr, "Not a Velox memory manager");
-  return new VeloxRuntime(kind, vmm, sessionConf);
+  return new VeloxRuntime(kind, vmm, threadManager, sessionConf);
 }
 
 void veloxRuntimeReleaser(Runtime* runtime) {
   delete runtime;
+}
+
+class VeloxThreadManager : public ThreadManager {
+ public:
+  VeloxThreadManager(const std::string& kind, std::unique_ptr<ThreadInitializer> initializer)
+      : ThreadManager(kind), initializer_(std::shared_ptr<ThreadInitializer>(std::move(initializer))) {}
+
+  ThreadInitializer* getThreadInitializer() override {
+    return initializer_.get();
+  }
+
+ private:
+  std::shared_ptr<ThreadInitializer> initializer_;
+};
+
+ThreadManager* veloxThreadManagerFactory(const std::string& kind, std::unique_ptr<ThreadInitializer> initializer) {
+  return new VeloxThreadManager(kind, std::move(initializer));
+}
+
+void veloxThreadManagerReleaser(ThreadManager* threadManager) {
+  delete threadManager;
 }
 } // namespace
 
@@ -122,6 +144,7 @@ void VeloxBackend::init(
 
   // Register factories.
   MemoryManager::registerFactory(kVeloxBackendKind, veloxMemoryManagerFactory, veloxMemoryManagerReleaser);
+  ThreadManager::registerFactory(kVeloxBackendKind, veloxThreadManagerFactory, veloxThreadManagerReleaser);
   Runtime::registerFactory(kVeloxBackendKind, veloxRuntimeFactory, veloxRuntimeReleaser);
 
   if (backendConf_->get<bool>(kDebugModeEnabled, false)) {
@@ -186,17 +209,30 @@ void VeloxBackend::init(
   }
 #endif
 
+  const int32_t numTaskSlotsPerExecutor = [&]() {
+    if (!backendConf_->valueExists(kNumTaskSlotsPerExecutor)) {
+      LOG(WARNING) << kNumTaskSlotsPerExecutor << " is not set. Falling back to 1.";
+      return 1;
+    }
+    return backendConf_->get<int32_t>(kNumTaskSlotsPerExecutor).value();
+  }();
+  GLUTEN_CHECK(
+      numTaskSlotsPerExecutor >= 0,
+      kNumTaskSlotsPerExecutor + " was set to negative number " + std::to_string(numTaskSlotsPerExecutor) +
+          ", this should not happen.");
+
   const auto spillThreadNum = backendConf_->get<uint32_t>(kSpillThreadNum, kSpillThreadNumDefaultValue);
   if (spillThreadNum > 0) {
     spillExecutor_ = std::make_unique<folly::CPUThreadPoolExecutor>(spillThreadNum);
   }
-  auto ioThreads = backendConf_->get<int32_t>(kVeloxIOThreads, kVeloxIOThreadsDefault);
+
+  const auto ioThreads = backendConf_->get<int32_t>(kVeloxIOThreads, numTaskSlotsPerExecutor);
   GLUTEN_CHECK(
       ioThreads >= 0,
       kVeloxIOThreads + " was set to negative number " + std::to_string(ioThreads) + ", this should not happen.");
   if (ioThreads > 0) {
-    ioExecutor_ = std::make_unique<folly::CPUThreadPoolExecutor>(
-        ioThreads, std::make_unique<folly::UnboundedBlockingQueue<folly::CPUThreadPoolExecutor::CPUTask>>());
+    ioExecutor_ =
+        std::make_unique<folly::CPUThreadPoolExecutor>(ioThreads, folly::CPUThreadPoolExecutor::makeLifoSemQueue());
   }
 
   initJolFilesystem();
@@ -228,9 +264,19 @@ void VeloxBackend::init(
   auto sparkOverhead = backendConf_->get<int64_t>(kSparkOverheadMemory);
   int64_t memoryManagerCapacity;
   if (sparkOverhead.has_value()) {
-    // 0.75 * total overhead memory is used for Velox global memory manager.
-    // FIXME: Make this configurable.
-    memoryManagerCapacity = sparkOverhead.value() * 0.75;
+    // Get configurable ratio for Velox global memory manager capacity
+    auto capacityRatio = backendConf_->get<double>(kMemoryManagerCapacityRatio);
+    double ratio = capacityRatio.has_value() ? capacityRatio.value() : kMemoryManagerCapacityRatioDefault;
+
+    if (ratio <= 0.0 || ratio > 1.0) {
+      LOG(WARNING) << "Invalid memory manager capacity ratio: " << ratio
+                   << ". Using default: " << kMemoryManagerCapacityRatioDefault;
+      ratio = kMemoryManagerCapacityRatioDefault;
+    }
+
+    memoryManagerCapacity = static_cast<int64_t>(sparkOverhead.value() * ratio);
+    LOG(INFO) << "Using memory manager capacity ratio: " << ratio << " (overhead: " << sparkOverhead.value()
+              << ", capacity: " << memoryManagerCapacity << ")";
   } else {
     memoryManagerCapacity = facebook::velox::memory::kMaxMemory;
   }
