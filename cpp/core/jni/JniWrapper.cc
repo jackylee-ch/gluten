@@ -1527,8 +1527,15 @@ Java_org_apache_gluten_vectorized_ColumnarBatchSerializerJniWrapper_deserializeW
   std::optional<std::vector<int32_t>> requestedOpt;
   if (requestedCols != nullptr) {
     jsize nCols = env->GetArrayLength(requestedCols);
-    auto safeCols = getIntArrayElementsSafe(env, requestedCols);
-    requestedOpt = std::vector<int32_t>(safeCols.elems(), safeCols.elems() + nCols);
+    if (nCols == 0) {
+      // Empty selection (e.g. count(*) zero-column projection). GetIntArrayElements
+      // may return a null pointer for an empty jintArray, so avoid pointer arithmetic
+      // (nullptr + 0 is UB) and construct an empty selection directly.
+      requestedOpt.emplace();
+    } else {
+      auto safeCols = getIntArrayElementsSafe(env, requestedCols);
+      requestedOpt = std::vector<int32_t>(safeCols.elems(), safeCols.elems() + nCols);
+    }
   }
   auto batch = serializer->deserializeV3(safeData.elems(), size, requestedOpt);
   return ctx->saveObject(batch);
