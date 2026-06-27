@@ -54,23 +54,6 @@ class ColumnarCachedBatchSerializerHelperSuite extends AnyFunSuite {
     out.write((v >>> 24) & 0xff)
   }
 
-  private def craftV3NoStatsFrame(
-      numRows: Int,
-      numCols: Int,
-      colBytes: Array[Byte]*): Array[Byte] = {
-    val out = new java.io.ByteArrayOutputStream()
-    out.write(Array[Byte](0xfe.toByte, 0xca.toByte, 0x53.toByte, 0x03.toByte))
-    writeU32LE(out, 0)
-    writeU32LE(out, numRows)
-    writeU32LE(out, numCols)
-    colBytes.foreach {
-      bytes =>
-        writeU32LE(out, bytes.length)
-        out.write(bytes)
-    }
-    out.toByteArray
-  }
-
   test("corrupt magic frame is absorbed into legacy fallback (stats=null)") {
     // 12 bytes: 4 bogus magic + 4-byte statsLen=0 + 4-byte bytesLen=0
     val corruptFramed: Array[Byte] = Array[Byte](0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
@@ -263,29 +246,6 @@ class ColumnarCachedBatchSerializerHelperSuite extends AnyFunSuite {
       assert(
         ColumnarCachedBatchSerializer.statsExtV3Available,
         "corrupt data should not disable the V3 JNI capability latch")
-    }
-  }
-
-  test("V3 frame row-count mismatch falls back without disabling V3 capability") {
-    ColumnarCachedBatchSerializer.withStatsExtV3AvailabilityForBenchmark(true) {
-      val jni = mock(classOf[ColumnarBatchSerializerJniWrapper])
-      when(jni.serializeV3(anyLong()))
-        .thenReturn(craftV3NoStatsFrame(numRows = 2, numCols = 1, Array[Byte](0x11.toByte)))
-      val (fallback, wasCalled) = newFallbackProbe()
-
-      val cb = ColumnarCachedBatchSerializer.serializeOneBatchV3(
-        jni,
-        0L,
-        numRows = 1,
-        structSchema,
-        includeStats = false,
-        fallback)
-
-      assert(wasCalled(), "fallback closure should be invoked on V3 row-count mismatch")
-      assert(cb.asInstanceOf[CachedColumnarBatch].stats == null)
-      assert(
-        ColumnarCachedBatchSerializer.statsExtV3Available,
-        "row-count mismatch is corrupt data and should not disable the V3 capability latch")
     }
   }
 }

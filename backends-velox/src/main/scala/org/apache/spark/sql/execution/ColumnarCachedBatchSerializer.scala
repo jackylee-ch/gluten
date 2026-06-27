@@ -250,12 +250,6 @@ object CachedColumnarBatchKryoSerializer {
   val STATS_FRAMED_MAGIC_V3: Array[Byte] =
     Array[Byte](0xfe.toByte, 0xca.toByte, 0x53.toByte, 0x03.toByte)
 
-  private case class V3ParsedFrame(
-      stats: InternalRow,
-      bytes: Array[Byte],
-      numRows: Int,
-      numCols: Int)
-
   private def magicHex(bytes: Array[Byte]): String = {
     if (bytes == null || bytes.length < 4) {
       "<short>"
@@ -711,36 +705,11 @@ object CachedColumnarBatchKryoSerializer {
   /**
    * V3 parse: extract stats; bytes = the full V3 framed array (C++ deserializeV3 starts at magic).
    * Invariant: returned bytes[0..3] == V3 magic; C++ deserializeV3 re-validates the schema-level
-   * contract, while the JVM parser fails fast on top-level frame bounds.
+   * contract (magic, statsLen, numRows/numCols, per-col bounds, schema numCols match), while this
+   * JVM parser fails fast on top-level frame bounds and statsBlob/frame column-count agreement (the
+   * only invariant C++ can't see, since C++ doesn't decode the statsBlob).
    */
   private def parseV3Frame(framed: Array[Byte], schema: StructType): (InternalRow, Array[Byte]) = {
-    val parsed = parseV3FrameInternal(framed, schema, decodeStats = true)
-    (parsed.stats, parsed.bytes)
-  }
-
-  // Validate the V3 frame's top-level shape against the CachedBatch / cached schema before the
-  // bytes are handed to native deserializeV3. This makes a corrupt or mismatched frame fail
-  // deterministically at the JVM layer (rather than only inside native deserializeV3, or worse,
-  // mis-aligning columns). expectedNumCols < 0 skips the column check (used by unit tests that
-  // only assert the numRows contract).
-  private[execution] def requireV3FrameNumRows(
-      framed: Array[Byte],
-      expectedNumRows: Int,
-      context: String,
-      expectedNumCols: Int = -1): Unit = {
-    val parsed = parseV3FrameInternal(framed, null, decodeStats = false)
-    require(
-      parsed.numRows == expectedNumRows,
-      s"$context: V3 frame numRows=${parsed.numRows} != CachedBatch numRows=$expectedNumRows")
-    require(
-      expectedNumCols < 0 || parsed.numCols == expectedNumCols,
-      s"$context: V3 frame numCols=${parsed.numCols} != cached schema numCols=$expectedNumCols")
-  }
-
-  private def parseV3FrameInternal(
-      framed: Array[Byte],
-      schema: StructType,
-      decodeStats: Boolean): V3ParsedFrame = {
     require(framed.length >= 16, s"V3 framed bytes too short (min 16B): len=${framed.length}")
     requireFrameMagic(framed, STATS_FRAMED_MAGIC_V3, "V3")
     val buf = ByteBuffer.wrap(framed).order(ByteOrder.LITTLE_ENDIAN)
@@ -751,13 +720,12 @@ object CachedColumnarBatchKryoSerializer {
       s"V3 framed bytes statsLen=$statsLen invalid")
     val statsBlob = new Array[Byte](statsLen)
     buf.get(statsBlob)
-    val stats =
-      if (!decodeStats || statsLen == 0) null else deserializeStats(statsBlob, schema)
+    val stats = if (statsLen == 0) null else deserializeStats(statsBlob, schema)
     val numRows = buf.getInt
     require(numRows >= 0, s"V3 framed bytes numRows=$numRows invalid")
     val numCols = buf.getInt
     require(numCols >= 0, s"V3 framed bytes numCols=$numCols invalid")
-    // When stats are decoded, the stats InternalRow must carry exactly 5 slots per frame column
+    // The stats InternalRow must carry exactly 5 slots per frame column
     // (lowerBound, upperBound, nullCount, count, sizeInBytes). A mismatch means the embedded
     // statsBlob's column count disagrees with the frame's numCols -- a corrupt/mis-encoded frame
     // that would mis-align partition stats against the actual columns; fail fast here.
@@ -786,7 +754,7 @@ object CachedColumnarBatchKryoSerializer {
       buf.remaining() == 0,
       s"V3 framed bytes has trailing bytes after column payloads: trailing=${buf.remaining()}")
     // Return full framed bytes; C++ deserializeV3 will skip magic+stats and per-col.
-    V3ParsedFrame(stats, framed, numRows, numCols)
+    (stats, framed)
   }
 }
 
@@ -1009,12 +977,10 @@ class ColumnarCachedBatchSerializer extends SimpleMetricsCachedBatchSerializer
                 val cachedBatch = it.next().asInstanceOf[CachedColumnarBatch]
                 // V3 bytes are ALWAYS routed to deserializeWithProjection.
                 // V3 framed bytes must NOT go to jni.deserialize() (expects Presto format).
+                // Structural validation (magic, statsLen, numRows/numCols, per-col bounds,
+                // schema numCols match) is handled by C++ deserializeV3; no JVM-side frame
+                // walk before the JNI call.
                 if (isV3Format(cachedBatch.bytes)) {
-                  CachedColumnarBatchKryoSerializer.requireV3FrameNumRows(
-                    cachedBatch.bytes,
-                    cachedBatch.numRows,
-                    "deserialize V3 cached batch",
-                    expectedNumCols = cacheAttributes.length)
                   // C++ returns the requested M-column batch; LazyVector loads those columns
                   // on first access instead of eagerly decoding the full cached schema.
                   val reqIndices: Array[Int] =
@@ -1320,11 +1286,6 @@ object ColumnarCachedBatchSerializer extends Logging {
           new RuntimeException("framedSerializeV3 returned null (backend not supported)"))
         return fallbackToV2OrLegacy()
       }
-      CachedColumnarBatchKryoSerializer.requireV3FrameNumRows(
-        framed,
-        numRows,
-        "serialize V3 cached batch",
-        expectedNumCols = structSchema.length)
       val (stats, _) = CachedColumnarBatchKryoSerializer.parseFramedBytes(framed, structSchema)
       // bytes = full V3 frame (C++ deserializeV3 parses from byte 0 including magic).
       CachedColumnarBatch(

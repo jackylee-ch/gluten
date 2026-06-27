@@ -722,54 +722,9 @@ class ColumnarCachedBatchFramedBytesSuite extends AnyFunSuite {
       s"expected trailing-bytes message, got: ${ex.getMessage}")
   }
 
-  test("V3: frame numRows must match outer CachedBatch numRows") {
-    val framed = craftV3Framed(Array.emptyByteArray, 5, 1, List(Array[Byte](0xab.toByte)))
-
-    CachedColumnarBatchKryoSerializer.requireV3FrameNumRows(
-      framed,
-      expectedNumRows = 5,
-      context = "test")
-
-    val ex = intercept[IllegalArgumentException] {
-      CachedColumnarBatchKryoSerializer.requireV3FrameNumRows(
-        framed,
-        expectedNumRows = 4,
-        context = "test")
-    }
-    assert(
-      ex.getMessage.contains("V3 frame numRows=5 != CachedBatch numRows=4"),
-      s"expected row-count mismatch message, got: ${ex.getMessage}")
-  }
-
-  test("V3: requireV3FrameNumRows rejects numCols mismatch vs cached schema") {
-    // 2-column frame; the JVM gate must reject a frame whose numCols disagrees with the cached
-    // schema deterministically, instead of only failing later inside native deserializeV3.
-    val framed = craftV3Framed(
-      Array.emptyByteArray,
-      5,
-      2,
-      List(Array[Byte](0xaa.toByte), Array[Byte](0xbb.toByte)))
-    // Matching numCols passes.
-    CachedColumnarBatchKryoSerializer.requireV3FrameNumRows(
-      framed,
-      expectedNumRows = 5,
-      context = "test",
-      expectedNumCols = 2)
-    val ex = intercept[IllegalArgumentException] {
-      CachedColumnarBatchKryoSerializer.requireV3FrameNumRows(
-        framed,
-        expectedNumRows = 5,
-        context = "test",
-        expectedNumCols = 3)
-    }
-    assert(
-      ex.getMessage.contains("numCols=2 != cached schema numCols=3"),
-      s"expected numCols-mismatch message, got: ${ex.getMessage}")
-  }
-
   test("V3: parseFramedBytes rejects statsBlob/frame column-count mismatch") {
     // statsBlob describes 2 columns, but the frame header declares numCols=1: the embedded stats
-    // would mis-align against the actual columns. parseV3FrameInternal must fail fast.
+    // would mis-align against the actual columns. parseV3Frame must fail fast.
     val twoColStats: InternalRow =
       new GenericInternalRow(Array[Any](1L, 10L, 0, 5, 100L, 2L, 20L, 0, 5, 200L))
     val statsBlob = CachedColumnarBatchKryoSerializer.serializeStats(twoColStats, null)
