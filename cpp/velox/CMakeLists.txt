@@ -262,6 +262,12 @@ if(ENABLE_GLUTEN_VCPKG AND NOT CMAKE_SYSTEM_NAME MATCHES "Darwin")
   target_link_options(
     velox PRIVATE -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/symbols.map)
 endif()
+if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
+  # Make libvelox.dylib own the Velox mono archive. Test utilities can then
+  # resolve Velox symbols from the dylib instead of linking a second copy.
+  target_link_options(velox PRIVATE
+                      "LINKER:-force_load,${VELOX_BUILD_PATH}/lib/libvelox.a")
+endif()
 
 find_protobuf()
 message(STATUS "Found Protobuf: ${PROTOBUF_LIBRARY}")
@@ -289,6 +295,9 @@ target_include_directories(
          ${VELOX_HOME}
          ${PROTO_OUTPUT_DIR}
          ${PROTOBUF_INCLUDE})
+if(GLUTEN_PREFIX_INCLUDE_DIRS)
+  target_include_directories(velox BEFORE PUBLIC ${GLUTEN_PREFIX_INCLUDE_DIRS})
+endif()
 
 set_target_properties(velox PROPERTIES LIBRARY_OUTPUT_DIRECTORY
                                        ${root_directory}/releases)
@@ -304,10 +313,22 @@ if(ENABLE_JEMALLOC_STATS)
   target_link_libraries(velox PUBLIC jemalloc::jemalloc)
 endif()
 
+if(CMAKE_SYSTEM_NAME MATCHES "Darwin" AND NOT ENABLE_JEMALLOC_STATS)
+  include(Findjemalloc)
+  find_jemalloc()
+  if(TARGET jemalloc::jemalloc)
+    target_link_libraries(velox PUBLIC jemalloc::jemalloc)
+  endif()
+endif()
+
 target_link_libraries(velox PUBLIC gluten)
 
 # Requires VELOX_MONO_LIBRARY=ON when building Velox.
 import_library(facebook::velox ${VELOX_BUILD_PATH}/lib/libvelox.a)
+set(GLUTEN_VELOX_LINK_SCOPE PUBLIC)
+if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
+  set(GLUTEN_VELOX_LINK_SCOPE PRIVATE)
+endif()
 
 if(BUILD_TESTS)
   add_duckdb()
@@ -337,7 +358,7 @@ if(BUILD_TESTS)
   target_link_libraries(velox PUBLIC facebook::velox::exec_test_lib)
 endif()
 
-target_link_libraries(velox PUBLIC facebook::velox)
+target_link_libraries(velox ${GLUTEN_VELOX_LINK_SCOPE} facebook::velox)
 
 target_link_libraries(velox PUBLIC ${GLUTEN_ROARING_LINK_LIBRARY})
 
@@ -555,13 +576,15 @@ if(ENABLE_GPU)
            velox_curl)
 endif()
 
-add_custom_command(
-  TARGET velox
-  POST_BUILD
-  COMMAND ld $<TARGET_FILE:velox> || true
-  COMMENT "Checking ld result of libvelox.so")
-add_custom_command(
-  TARGET velox
-  POST_BUILD
-  COMMAND ldd $<TARGET_FILE:velox> || true
-  COMMENT "Checking ldd result of libvelox.so")
+if(CMAKE_SYSTEM_NAME MATCHES "Linux")
+  add_custom_command(
+    TARGET velox
+    POST_BUILD
+    COMMAND ld $<TARGET_FILE:velox> || true
+    COMMENT "Checking ld result of libvelox.so")
+  add_custom_command(
+    TARGET velox
+    POST_BUILD
+    COMMAND ldd $<TARGET_FILE:velox> || true
+    COMMENT "Checking ldd result of libvelox.so")
+endif()

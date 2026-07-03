@@ -23,18 +23,22 @@ set(ARROW_BUNDLED_DEPS "arrow_bundled_dependencies")
 set(ARROW_INSTALL_DIR "${ARROW_HOME}/install")
 set(ARROW_LIB_DIR "${ARROW_INSTALL_DIR}/lib")
 set(ARROW_LIB64_DIR "${ARROW_INSTALL_DIR}/lib64")
+set(ARROW_PREFIX_LIB_DIRS)
+foreach(PREFIX_PATH IN LISTS CMAKE_PREFIX_PATH)
+  list(APPEND ARROW_PREFIX_LIB_DIRS "${PREFIX_PATH}/lib" "${PREFIX_PATH}/lib64")
+endforeach()
 
 function(FIND_ARROW_LIB LIB_NAME)
   if(NOT TARGET Arrow::${LIB_NAME})
     set(ARROW_LIB_FULL_NAME
         ${CMAKE_SHARED_LIBRARY_PREFIX}${LIB_NAME}${ARROW_STATIC_LIBRARY_SUFFIX})
     add_library(Arrow::${LIB_NAME} STATIC IMPORTED)
-    # Firstly find the lib from bundled path in Velox. If not found, try to find
-    # it from system.
+    # Prefer the user-provided CMAKE_PREFIX_PATH/INSTALL_PREFIX. Fall back to
+    # Velox's bundled Arrow and then the normal system search.
     find_library(
       ARROW_LIB_${LIB_NAME}
       NAMES ${ARROW_LIB_FULL_NAME}
-      PATHS ${ARROW_LIB_DIR} ${ARROW_LIB64_DIR}
+      PATHS ${ARROW_PREFIX_LIB_DIRS} ${ARROW_LIB_DIR} ${ARROW_LIB64_DIR}
       NO_DEFAULT_PATH)
     if(NOT ARROW_LIB_${LIB_NAME})
       find_library(ARROW_LIB_${LIB_NAME} NAMES ${ARROW_LIB_FULL_NAME})

@@ -180,12 +180,18 @@ function cmake_install {
 
   local MACOS_ISOLATION_FLAGS=""
   if [[ "$(uname)" == "Darwin" ]]; then
-    if [[ "${INSTALL_PREFIX:-}" == "/usr/local" || "${INSTALL_PREFIX:-}" == /usr/local/* ]]; then
+    if [[ -z "${INSTALL_PREFIX:-}" ]]; then
+      :
+    elif [[ "${INSTALL_PREFIX:-}" == "/usr/local" || "${INSTALL_PREFIX:-}" == /usr/local/* ]]; then
       echo "INFO: INSTALL_PREFIX=${INSTALL_PREFIX} is under /usr/local; keeping /usr/local visible to CMake." >&2
     else
-      COMPILER_FLAGS="$COMPILER_FLAGS -isystem /usr/local/include"
-      MACOS_ISOLATION_FLAGS="-DCMAKE_NO_SYSTEM_FROM_IMPORTED=ON \
-        -DCMAKE_IGNORE_PREFIX_PATH=/usr/local \
+      # CMake ignore paths only affect package discovery. AppleClang still injects
+      # /usr/local/include ahead of user include paths unless standard system
+      # includes are rebuilt by the driver.
+      local MACOS_SDK_PATH
+      MACOS_SDK_PATH=$(xcrun --show-sdk-path)
+      COMPILER_FLAGS="$COMPILER_FLAGS -Xclang -nostdsysteminc -isysroot ${MACOS_SDK_PATH} -iframework ${MACOS_SDK_PATH}/System/Library/Frameworks"
+      MACOS_ISOLATION_FLAGS="-DCMAKE_IGNORE_PREFIX_PATH=/usr/local \
         -DCMAKE_IGNORE_PATH=/usr/local;/usr/local/include;/usr/local/lib;/usr/local/lib/cmake \
         -DCMAKE_SYSTEM_IGNORE_PATH=/usr/local;/usr/local/include;/usr/local/lib;/usr/local/lib/cmake"
     fi

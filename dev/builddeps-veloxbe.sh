@@ -217,6 +217,7 @@ concat_velox_param
 export VELOX_HOME
 
 function build_arrow {
+  local GLUTEN_BUILD_TYPE="$BUILD_TYPE"
   if [ ! -d "$VELOX_HOME" ]; then
     get_velox
     if [ -z "${GLUTEN_VCPKG_ENABLED:-}" ] && [ $RUN_SETUP_SCRIPT == "ON" ]; then
@@ -227,6 +228,7 @@ function build_arrow {
   fi
   cd $GLUTEN_DIR/dev
   source ./build-arrow.sh
+  BUILD_TYPE="$GLUTEN_BUILD_TYPE"
 }
 
 function build_velox {
@@ -269,13 +271,18 @@ function build_gluten_cpp {
     GLUTEN_CMAKE_OPTIONS+=("-DCMAKE_INSTALL_PREFIX=$INSTALL_PREFIX")
   fi
   if [ $OS == 'Darwin' ]; then
-    if [[ "${INSTALL_PREFIX:-}" != "/usr/local" && "${INSTALL_PREFIX:-}" != /usr/local/* ]]; then
-      GLUTEN_CMAKE_OPTIONS+=("-DCMAKE_NO_SYSTEM_FROM_IMPORTED=ON")
+    GLUTEN_CXX_FLAGS="-Wno-inconsistent-missing-override -Wno-macro-redefined"
+    if [[ -n "${INSTALL_PREFIX:-}" && "${INSTALL_PREFIX:-}" != "/usr/local" && "${INSTALL_PREFIX:-}" != /usr/local/* ]]; then
       GLUTEN_CMAKE_OPTIONS+=("-DCMAKE_IGNORE_PREFIX_PATH=/usr/local")
       GLUTEN_CMAKE_OPTIONS+=("-DCMAKE_IGNORE_PATH=/usr/local;/usr/local/include;/usr/local/lib;/usr/local/lib/cmake")
       GLUTEN_CMAKE_OPTIONS+=("-DCMAKE_SYSTEM_IGNORE_PATH=/usr/local;/usr/local/include;/usr/local/lib;/usr/local/lib/cmake")
+      # CMake ignore paths only affect package discovery. AppleClang still injects
+      # /usr/local/include ahead of user include paths unless standard system
+      # includes are rebuilt by the driver.
+      MACOS_SDK_PATH=$(xcrun --show-sdk-path)
+      GLUTEN_CXX_FLAGS="-Xclang -nostdsysteminc -isysroot ${MACOS_SDK_PATH} -iframework ${MACOS_SDK_PATH}/System/Library/Frameworks ${GLUTEN_CXX_FLAGS}"
     fi
-    GLUTEN_CMAKE_OPTIONS+=("-DCMAKE_CXX_FLAGS=-Wno-inconsistent-missing-override -Wno-macro-redefined")
+    GLUTEN_CMAKE_OPTIONS+=("-DCMAKE_CXX_FLAGS=${GLUTEN_CXX_FLAGS}")
   fi
 
   cmake -G Ninja "${GLUTEN_CMAKE_OPTIONS[@]}" ..

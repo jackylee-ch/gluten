@@ -90,18 +90,22 @@ function process_setup_tencentos32 {
 }
 
 # Keep macOS dependency builds on INSTALL_PREFIX even when /usr/local is present.
-# Apple clang injects /usr/local/include as a normal include path before CMake's
-# imported system includes, which can mix /usr/local headers with INSTALL_PREFIX
-# libraries. Demote it to system include order. Folly also enables jemalloc from
-# Homebrew headers but does not link libjemalloc, so keep Folly's Linux-equivalent
-# no-jemalloc behavior here; Gluten's own jemalloc build is independent of this.
+# AppleClang injects /usr/local/include before CMake's system include dirs; make
+# setup-macos use the same compiler-level isolation as the Gluten and Velox CMake
+# builds while leaving Homebrew's explicit include path available as a system dir.
 function process_setup_macos {
-  if [[ "${INSTALL_PREFIX:-}" != "/usr/local" && "${INSTALL_PREFIX:-}" != /usr/local/* ]] &&
-      ! grep -Fq '/usr/local/include' scripts/setup-macos.sh; then
-    sed -i '' 's|OS_CXXFLAGS=" -isystem $(brew --prefix)/include "|OS_CXXFLAGS=" -isystem $(brew --prefix)/include -isystem /usr/local/include "|' scripts/setup-macos.sh
+  if [[ -n "${INSTALL_PREFIX:-}" && "${INSTALL_PREFIX:-}" != "/usr/local" && "${INSTALL_PREFIX:-}" != /usr/local/* ]] &&
+      ! grep -Fq 'nostdsysteminc' scripts/setup-macos.sh; then
+    sed -i '' 's|OS_CXXFLAGS=" -isystem $(brew --prefix)/include "|OS_CXXFLAGS=" -Xclang -nostdsysteminc -isysroot $(xcrun --show-sdk-path) -iframework $(xcrun --show-sdk-path)/System/Library/Frameworks -isystem $(brew --prefix)/include "|' scripts/setup-macos.sh
   fi
-  if ! grep -Fq 'FOLLY_USE_JEMALLOC=OFF' scripts/setup-common.sh; then
-    sed -i '' 's/local FOLLY_FLAGS=(/local FOLLY_FLAGS=(-DFOLLY_USE_JEMALLOC=OFF /' scripts/setup-common.sh
+  if [[ -n "${INSTALL_PREFIX:-}" && "${INSTALL_PREFIX:-}" != "/usr/local" && "${INSTALL_PREFIX:-}" != /usr/local/* ]] &&
+      ! grep -Fq 'FOLLY_LINK_LIBRARIES' scripts/setup-common.sh; then
+    sed -i '' '/local FOLLY_FLAGS=(/a\
+  local JEMALLOC_PREFIX="$(brew --prefix jemalloc 2>/dev/null || true)"\
+  if [[ -f "${JEMALLOC_PREFIX}/lib/libjemalloc.dylib" ]]; then\
+    FOLLY_FLAGS+=("-DFOLLY_LINK_LIBRARIES=${JEMALLOC_PREFIX}/lib/libjemalloc.dylib")\
+  fi
+' scripts/setup-common.sh
   fi
 }
 

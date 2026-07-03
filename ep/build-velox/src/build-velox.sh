@@ -106,6 +106,36 @@ function install_cmake_dependency {
   fi
 }
 
+function patch_macos_gtest_include_order {
+  if [[ "$OS" != 'Darwin' || -z "${INSTALL_PREFIX:-}" ||
+      "${INSTALL_PREFIX:-}" == "/usr/local" || "${INSTALL_PREFIX:-}" == /usr/local/* ]]; then
+    return
+  fi
+
+  local gtest_targets="${INSTALL_PREFIX}/lib/cmake/GTest/GTestTargets.cmake"
+  if [ -f "$gtest_targets" ] &&
+      grep -Fq 'INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_IMPORT_PREFIX}/include"' "$gtest_targets"; then
+    # GTest exports INSTALL_PREFIX/include both as a normal include and a system
+    # include. CMake keeps the system form after Homebrew include dirs, which can
+    # compile tests with Homebrew headers while linking INSTALL_PREFIX libraries.
+    sed -i '' '/INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "\${_IMPORT_PREFIX}\/include"/d' "$gtest_targets"
+  fi
+}
+
+function patch_macos_folly_gflags_linkage {
+  if [[ "$OS" != 'Darwin' || -z "${INSTALL_PREFIX:-}" ||
+      "${INSTALL_PREFIX:-}" == "/usr/local" || "${INSTALL_PREFIX:-}" == /usr/local/* ]]; then
+    return
+  fi
+
+  local folly_targets="${INSTALL_PREFIX}/lib/cmake/folly/folly-targets.cmake"
+  if [ -f "$folly_targets" ] && grep -Fq 'gflags_static' "$folly_targets"; then
+    # Folly exports gflags_static while glog exports the dynamic gflags target.
+    # Loading both on macOS makes gflags register built-in flags twice in tests.
+    sed -i '' 's/gflags_static/gflags_shared/g' "$folly_targets"
+  fi
+}
+
 function compile {
   # -Wno-unknown-warning-option is a Clang-originated flag. GCC ignores unrecognized -Wno- flags to
   # maintain compatibility, but it prints a diagnostic note about the unknown flag if a true warning
@@ -114,8 +144,12 @@ function compile {
     -Wno-error=uninitialized -Wno-unknown-warning-option -Wno-deprecated-declarations'
   if [[ "$(uname)" == "Darwin" ]]; then
     CXX_FLAGS="$CXX_FLAGS -Wno-inconsistent-missing-override -Wno-macro-redefined"
-    if [[ "${INSTALL_PREFIX:-}" != "/usr/local" && "${INSTALL_PREFIX:-}" != /usr/local/* ]]; then
-      CXX_FLAGS="$CXX_FLAGS -isystem /usr/local/include"
+    if [[ -n "${INSTALL_PREFIX:-}" && "${INSTALL_PREFIX:-}" != "/usr/local" && "${INSTALL_PREFIX:-}" != /usr/local/* ]]; then
+      # CMake ignore paths only affect package discovery. AppleClang still injects
+      # /usr/local/include ahead of user include paths unless standard system
+      # includes are rebuilt by the driver.
+      MACOS_SDK_PATH=$(xcrun --show-sdk-path)
+      CXX_FLAGS="$CXX_FLAGS -I${INSTALL_PREFIX}/include -Xclang -nostdsysteminc -isysroot ${MACOS_SDK_PATH} -iframework ${MACOS_SDK_PATH}/System/Library/Frameworks"
     fi
   fi
 
@@ -125,11 +159,19 @@ function compile {
   if [ -n "${INSTALL_PREFIX:-}" ]; then
     COMPILE_OPTION="$COMPILE_OPTION -DCMAKE_PREFIX_PATH=${INSTALL_PREFIX} -DCMAKE_INSTALL_PREFIX=${INSTALL_PREFIX}"
   fi
-  if [[ "$(uname)" == "Darwin" && "${INSTALL_PREFIX:-}" != "/usr/local" && "${INSTALL_PREFIX:-}" != /usr/local/* ]]; then
-    COMPILE_OPTION="$COMPILE_OPTION -DCMAKE_NO_SYSTEM_FROM_IMPORTED=ON"
+  if [[ "$(uname)" == "Darwin" && -n "${INSTALL_PREFIX:-}" && "${INSTALL_PREFIX:-}" != "/usr/local" && "${INSTALL_PREFIX:-}" != /usr/local/* ]]; then
     COMPILE_OPTION="$COMPILE_OPTION -DCMAKE_IGNORE_PREFIX_PATH=/usr/local"
     COMPILE_OPTION="$COMPILE_OPTION -DCMAKE_IGNORE_PATH=/usr/local\;/usr/local/include\;/usr/local/lib\;/usr/local/lib/cmake"
     COMPILE_OPTION="$COMPILE_OPTION -DCMAKE_SYSTEM_IGNORE_PATH=/usr/local\;/usr/local/include\;/usr/local/lib\;/usr/local/lib/cmake"
+    # Test targets are sensitive to header/library version mismatches. If these
+    # packages were installed into INSTALL_PREFIX, keep CMake from reusing a
+    # cached or Homebrew package while includes come from INSTALL_PREFIX.
+    if [ -d "${INSTALL_PREFIX}/lib/cmake/GTest" ]; then
+      COMPILE_OPTION="$COMPILE_OPTION -DGTest_DIR=${INSTALL_PREFIX}/lib/cmake/GTest"
+    fi
+    if [ -d "${INSTALL_PREFIX}/lib/cmake/fmt" ]; then
+      COMPILE_OPTION="$COMPILE_OPTION -Dfmt_DIR=${INSTALL_PREFIX}/lib/cmake/fmt"
+    fi
   fi
   if [ $BUILD_TEST_UTILS == "ON" ]; then
     COMPILE_OPTION="$COMPILE_OPTION -DVELOX_BUILD_TEST_UTILS=ON"
@@ -191,7 +233,9 @@ function compile {
     cd _build/$COMPILE_TYPE/_deps
     if [ -d xsimd-build ]; then
       echo "INSTALL xsimd."
-      install_cmake_dependency xsimd-build/
+      if [ -f xsimd-build/cmake_install.cmake ]; then
+        install_cmake_dependency xsimd-build/
+      fi
     fi
     if [ -d googletest-build ]; then
       echo "INSTALL gtest."
@@ -200,6 +244,7 @@ function compile {
         #sudo cmake --install googletest-build/
       elif [ $OS == 'Darwin' ]; then
         install_cmake_dependency googletest-build/
+        patch_macos_gtest_include_order
       fi
     fi
   fi
@@ -234,6 +279,8 @@ echo "ENABLE_GPU=${ENABLE_GPU}"
 echo "BUILD_TYPE=${BUILD_TYPE}"
 
 cd ${VELOX_HOME}
+patch_macos_gtest_include_order
+patch_macos_folly_gflags_linkage
 compile
 
 echo "Successfully built Velox from Source."
