@@ -220,6 +220,9 @@ target_include_directories(
   gluten
   PUBLIC ${CMAKE_SYSTEM_INCLUDE_PATH} ${JNI_INCLUDE_DIRS}
          ${CMAKE_CURRENT_SOURCE_DIR} ${PROTO_OUTPUT_DIR} ${PROTOBUF_INCLUDE})
+if(GLUTEN_PREFIX_INCLUDE_DIRS)
+  target_include_directories(gluten BEFORE PUBLIC ${GLUTEN_PREFIX_INCLUDE_DIRS})
+endif()
 set_target_properties(gluten PROPERTIES LIBRARY_OUTPUT_DIRECTORY
                                         ${root_directory}/releases)
 
@@ -241,13 +244,15 @@ install(TARGETS gluten DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/resources/libhdfs.so
         DESTINATION ${LIBHDFS3_DESTINATION})
 
-add_custom_command(
-  TARGET gluten
-  POST_BUILD
-  COMMAND ld $<TARGET_FILE:gluten> || true
-  COMMENT "Checking ld result of libgluten.so")
-add_custom_command(
-  TARGET gluten
-  POST_BUILD
-  COMMAND ldd $<TARGET_FILE:gluten> || true
-  COMMENT "Checking ldd result of libgluten.so")
+if(CMAKE_SYSTEM_NAME MATCHES "Linux")
+  add_custom_command(
+    TARGET gluten
+    POST_BUILD
+    COMMAND ld $<TARGET_FILE:gluten> || true
+    COMMENT "Checking ld result of libgluten.so")
+  add_custom_command(
+    TARGET gluten
+    POST_BUILD
+    COMMAND ldd $<TARGET_FILE:gluten> || true
+    COMMENT "Checking ldd result of libgluten.so")
+endif()
