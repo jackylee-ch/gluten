@@ -18,7 +18,7 @@ package org.apache.gluten.backendsapi.velox
 
 import org.apache.gluten.GlutenBuildInfo._
 import org.apache.gluten.backendsapi._
-import org.apache.gluten.config.{GlutenConfig, VeloxConfig}
+import org.apache.gluten.config.{GlutenConfig, HadoopConfContributor, VeloxConfig}
 import org.apache.gluten.exception.GlutenNotSupportException
 import org.apache.gluten.execution.ValidationResult
 import org.apache.gluten.execution.WriteFilesExecTransformer
@@ -52,7 +52,7 @@ import org.apache.hadoop.fs.Path
 
 import scala.util.control.Breaks.breakable
 
-class VeloxBackend extends SubstraitBackend {
+class VeloxBackend extends SubstraitBackend with HadoopConfContributor {
   import VeloxBackend._
 
   override def name(): String = VeloxBackend.BACKEND_NAME
@@ -72,6 +72,7 @@ class VeloxBackend extends SubstraitBackend {
   override def settings(): BackendSettingsApi = VeloxBackendSettings
   override def convFuncOverride(): ConventionFunc.Override = new ConvFunc()
   override def costers(): Seq[LongCoster] = Seq(LegacyCoster, RoughCoster)
+  override def interestedPrefixes(): Set[String] = Set("fs.")
 }
 
 object VeloxBackend {

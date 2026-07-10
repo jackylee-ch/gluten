@@ -246,6 +246,21 @@ std::string parquetSessionProperty(std::string_view key) {
 
 } // namespace
 
+std::shared_ptr<facebook::velox::config::ConfigBase> mergeFileSystemConfigs(
+    const std::shared_ptr<facebook::velox::config::ConfigBase>& backendConf,
+    const std::shared_ptr<facebook::velox::config::ConfigBase>& runtimeConf) {
+  constexpr std::string_view kSparkHadoopFsPrefix = "spark.hadoop.fs.";
+
+  auto merged = backendConf->rawConfigs();
+  for (const auto& [key, value] : runtimeConf->rawConfigs()) {
+    if (key.starts_with(kSparkHadoopFsPrefix)) {
+      merged.insert_or_assign(key, value);
+    }
+  }
+
+  return std::make_shared<facebook::velox::config::ConfigBase>(std::move(merged));
+}
+
 std::shared_ptr<facebook::velox::config::ConfigBase> createHiveConnectorSessionConfig(
     const std::shared_ptr<facebook::velox::config::ConfigBase>& conf) {
   // The configs below are used at session level.

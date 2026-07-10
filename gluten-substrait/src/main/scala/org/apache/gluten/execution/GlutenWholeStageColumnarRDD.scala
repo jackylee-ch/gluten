@@ -16,7 +16,7 @@
  */
 package org.apache.gluten.execution
 
-import org.apache.gluten.backendsapi.BackendsApiManager
+import org.apache.gluten.backendsapi.{BackendsApiManager, IteratorApi}
 import org.apache.gluten.config.GlutenConfig
 import org.apache.gluten.extension.ApplyStageInputStatsRule
 import org.apache.gluten.metrics.{GlutenTimeMetric, IMetrics}
@@ -61,7 +61,8 @@ class GlutenWholeStageColumnarRDD(
     updateInputMetrics: InputMetricsWrapper => Unit,
     updateNativeMetrics: IMetrics => Unit,
     enableCudf: Boolean = false,
-    wsContext: WholeStageTransformContext = null)
+    wsContext: WholeStageTransformContext = null,
+    val fsConf: Map[String, String] = Map.empty)
   extends RDD[ColumnarBatch](sc, rdds.getDependencies) {
 
   override def compute(split: Partition, context: TaskContext): Iterator[ColumnarBatch] = {
@@ -75,18 +76,32 @@ class GlutenWholeStageColumnarRDD(
         }
         val (inputPartition, inputColumnarRDDPartitions) = castNativePartition(split)
         val inputIterators = rdds.getIterators(inputColumnarRDDPartitions, context)
-        BackendsApiManager.getIteratorApiInstance.genFirstStageIterator(
+        createFirstStageIterator(
+          BackendsApiManager.getIteratorApiInstance,
           inputPartition,
           context,
-          pipelineTime,
-          updateInputMetrics,
-          updateNativeMetrics,
-          split.index,
           inputIterators,
-          enableCudf,
-          wsContext
-        )
+          split.index)
     }
+  }
+
+  private[gluten] def createFirstStageIterator(
+      iteratorApi: IteratorApi,
+      inputPartition: BaseGlutenPartition,
+      context: TaskContext,
+      inputIterators: Seq[Iterator[ColumnarBatch]],
+      partitionIndex: Int): Iterator[ColumnarBatch] = {
+    iteratorApi.genFirstStageIterator(
+      inputPartition,
+      context,
+      pipelineTime,
+      updateInputMetrics,
+      updateNativeMetrics,
+      partitionIndex,
+      inputIterators,
+      enableCudf,
+      wsContext,
+      fsConf)
   }
 
   private def castNativePartition(split: Partition): (BaseGlutenPartition, Seq[Partition]) = {

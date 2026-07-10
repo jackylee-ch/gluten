@@ -322,7 +322,8 @@ case class WholeStageTransformer(child: SparkPlan, materializeInput: Boolean = f
       leafTransformers: Seq[LeafTransformSupport],
       wsCtx: WholeStageTransformContext,
       inputRDDs: ColumnarInputRDDsWrapper,
-      pipelineTime: SQLMetric): RDD[ColumnarBatch] = {
+      pipelineTime: SQLMetric,
+      fsConf: Map[String, String]): RDD[ColumnarBatch] = {
 
     // If these are two leaf transformers, they must have same partitions,
     // otherwise, exchange will be inserted. We should combine the two leaf
@@ -380,7 +381,8 @@ case class WholeStageTransformer(child: SparkPlan, materializeInput: Boolean = f
         wsCtx.substraitContext.registeredAggregationParams
       ),
       wsCtx.enableCudf,
-      wsCtx
+      wsCtx,
+      fsConf
     )
 
     val allInputPartitions = leafTransformers.map(_.getPartitions)
@@ -409,8 +411,15 @@ case class WholeStageTransformer(child: SparkPlan, materializeInput: Boolean = f
     val inputRDDs = new ColumnarInputRDDsWrapper(columnarInputRDDs)
 
     val leafTransformers = findAllLeafTransformers()
+    // DataFrameReader.option() / DataStreamReader.option() settings live on the scan, not in the
+    // session Hadoop configuration, so collect them from the leaf scans and merge them into fsConf.
+    val readerOptions = leafTransformers.collect {
+      case scan: BasicScanExecTransformer => scan.readerOptions
+    }
+    val fsConf = HadoopConfCollector.collect(session, readerOptions)
+
     if (leafTransformers.nonEmpty) {
-      generateWholeStageRDD(leafTransformers, wsCtx, inputRDDs, pipelineTime)
+      generateWholeStageRDD(leafTransformers, wsCtx, inputRDDs, pipelineTime, fsConf)
     } else {
 
       /**
@@ -436,7 +445,8 @@ case class WholeStageTransformer(child: SparkPlan, materializeInput: Boolean = f
           wsCtx.substraitContext.registeredAggregationParams
         ),
         materializeInput,
-        inputRDDs.getPartitionLength
+        inputRDDs.getPartitionLength,
+        fsConf
       )
     }
   }

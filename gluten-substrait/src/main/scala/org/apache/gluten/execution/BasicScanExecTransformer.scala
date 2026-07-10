@@ -95,6 +95,14 @@ trait BasicScanExecTransformer extends LeafTransformSupport with BaseDataSource 
   /** Returns the file format properties. */
   def getProperties: Map[String, String] = Map.empty
 
+  /**
+   * Returns options passed via DataFrameReader.option() / DataStreamReader.option(). For DSv1 file
+   * scans these live in HadoopFsRelation.options and are absent from the session Hadoop
+   * configuration, so they must be collected from the scan and forwarded to the native engine
+   * separately.
+   */
+  def readerOptions: Map[String, String] = Map.empty
+
   def getInputStats: Option[InputStats] = Option.empty
 
   override def getSplitInfos: Seq[SplitInfo] = {

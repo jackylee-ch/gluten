@@ -77,13 +77,28 @@ class VeloxBackend {
       const std::string& connectorId,
       folly::Executor* ioExecutor) const;
 
+  std::shared_ptr<facebook::velox::connector::Connector> createHiveConnector(
+      const std::string& connectorId,
+      folly::Executor* ioExecutor,
+      std::shared_ptr<const facebook::velox::config::ConfigBase> hiveConnectorConfig) const;
+
   std::shared_ptr<facebook::velox::connector::Connector> createIcebergConnector(
+      const std::string& connectorId,
+      folly::Executor* ioExecutor) const;
+
+  std::shared_ptr<facebook::velox::connector::Connector> createIcebergConnector(
+      const std::string& connectorId,
+      folly::Executor* ioExecutor,
+      std::shared_ptr<const facebook::velox::config::ConfigBase> hiveConnectorConfig) const;
+
+  std::shared_ptr<facebook::velox::connector::Connector> createDeltaConnector(
       const std::string& connectorId,
       folly::Executor* ioExecutor) const;
 
   std::shared_ptr<facebook::velox::connector::Connector> createDeltaConnector(
       const std::string& connectorId,
-      folly::Executor* ioExecutor) const;
+      folly::Executor* ioExecutor,
+      std::shared_ptr<const facebook::velox::config::ConfigBase> hiveConnectorConfig) const;
 
   std::shared_ptr<facebook::velox::connector::Connector> createValueStreamConnector(
       const std::string& connectorId,
@@ -93,6 +108,11 @@ class VeloxBackend {
   std::shared_ptr<facebook::velox::connector::Connector> createCudfHiveConnector(
       const std::string& connectorId,
       folly::Executor* ioExecutor) const;
+
+  std::shared_ptr<facebook::velox::connector::Connector> createCudfHiveConnector(
+      const std::string& connectorId,
+      folly::Executor* ioExecutor,
+      std::shared_ptr<const facebook::velox::config::ConfigBase> hiveConnectorConfig) const;
 #endif
 
   void tearDown();

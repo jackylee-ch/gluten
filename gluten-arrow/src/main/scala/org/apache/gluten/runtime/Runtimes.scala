@@ -20,7 +20,30 @@ import org.apache.spark.task.TaskResources
 
 import java.util
 
+import scala.collection.JavaConverters._
+
 object Runtimes {
+
+  private val SparkHadoopFsPrefix = "spark.hadoop.fs."
+
+  private[gluten] def resourceId(
+      backendName: String,
+      name: String,
+      extraConf: util.Map[String, String]): String = {
+    // This id surfaces in TaskResources exception messages, so filesystem credential values (which
+    // may appear in extraConf) are replaced with an empty placeholder. Phase-1 assumes a single
+    // credential set per session, so distinct fs values need not yield distinct runtimes. The
+    // length prefixes keep the encoding unambiguous when keys or values contain delimiters.
+    val encoded = extraConf.asScala.toSeq
+      .sortBy { case (key, _) => key }
+      .map {
+        case (key, value) =>
+          val safeValue = if (key.startsWith(SparkHadoopFsPrefix)) "" else value
+          s"${key.length}:$key=${safeValue.length}:$safeValue"
+      }
+      .mkString(",")
+    s"$backendName:$name:$encoded"
+  }
 
   def contextInstance(
       backendName: String,
@@ -30,7 +53,7 @@ object Runtimes {
       throw new IllegalStateException("This method must be called in a Spark task.")
     }
     TaskResources.addResourceIfNotRegistered(
-      s"$backendName:$name:$extraConf",
+      resourceId(backendName, name, extraConf),
       () => Runtime(backendName, name, extraConf))
   }
 

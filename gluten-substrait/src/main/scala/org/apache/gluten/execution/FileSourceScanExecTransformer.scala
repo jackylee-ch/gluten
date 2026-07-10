@@ -214,6 +214,8 @@ abstract class FileSourceScanExecTransformerBase(
     }
   }
 
+  override def readerOptions: Map[String, String] = relation.options
+
   @transient override lazy val fileFormat: ReadFileFormat =
     BackendsApiManager.getSettings.getSubstraitReadFileFormatV1(relation.fileFormat)
 

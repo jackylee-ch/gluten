@@ -21,6 +21,7 @@
 
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 #include "velox/common/config/Config.h"
@@ -28,6 +29,10 @@
 namespace gluten {
 
 enum class FileSystemType : uint8_t { kHdfs, kS3, kAbfs, kGcs, kAll };
+
+std::shared_ptr<facebook::velox::config::ConfigBase> mergeFileSystemConfigs(
+    const std::shared_ptr<facebook::velox::config::ConfigBase>& backendConf,
+    const std::shared_ptr<facebook::velox::config::ConfigBase>& runtimeConf);
 
 /// Create hive connector session config.
 std::shared_ptr<facebook::velox::config::ConfigBase> createHiveConnectorSessionConfig(
