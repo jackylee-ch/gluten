@@ -202,6 +202,30 @@ class VeloxIteratorApi extends IteratorApi with Logging {
       inputIterators: Seq[Iterator[ColumnarBatch]] = Seq(),
       enableCudf: Boolean = false,
       wsContext: WholeStageTransformContext = null): Iterator[ColumnarBatch] = {
+    genFirstStageIterator(
+      inputPartition,
+      context,
+      pipelineTime,
+      updateInputMetrics,
+      updateNativeMetrics,
+      partitionIndex,
+      inputIterators,
+      enableCudf,
+      wsContext,
+      Map.empty)
+  }
+
+  override def genFirstStageIterator(
+      inputPartition: BaseGlutenPartition,
+      context: TaskContext,
+      pipelineTime: SQLMetric,
+      updateInputMetrics: InputMetricsWrapper => Unit,
+      updateNativeMetrics: IMetrics => Unit,
+      partitionIndex: Int,
+      inputIterators: Seq[Iterator[ColumnarBatch]],
+      enableCudf: Boolean,
+      wsContext: WholeStageTransformContext,
+      fsConf: Map[String, String]): Iterator[ColumnarBatch] = {
     assert(
       inputPartition.isInstanceOf[GlutenPartition],
       "Velox backend only accept GlutenPartition.")
@@ -210,7 +234,9 @@ class VeloxIteratorApi extends IteratorApi with Logging {
       iter => new ColumnarBatchInIterator(BackendsApiManager.getBackendName, iter.asJava)
     }
 
-    val extraConf = Map(GlutenConfig.COLUMNAR_CUDF_ENABLED.key -> enableCudf.toString).asJava
+    val extraConf = VeloxIteratorApi
+      .buildExtraConf(fsConf, enableCudf, supportsValueStreamDynamicFilter = true)
+      .asJava
     val transKernel = NativePlanEvaluator.create(BackendsApiManager.getBackendName, extraConf)
 
     val splitInfoByteArray = inputPartition
@@ -262,11 +288,36 @@ class VeloxIteratorApi extends IteratorApi with Logging {
       materializeInput: Boolean,
       enableCudf: Boolean = false,
       supportsValueStreamDynamicFilter: Boolean = true): Iterator[ColumnarBatch] = {
-    val extraConfMap = mutable.Map(GlutenConfig.COLUMNAR_CUDF_ENABLED.key -> enableCudf.toString)
-    if (!supportsValueStreamDynamicFilter) {
-      extraConfMap(VeloxConfig.VALUE_STREAM_DYNAMIC_FILTER_ENABLED.key) = "false"
-    }
-    val extraConf = extraConfMap.asJava
+    genFinalStageIterator(
+      context,
+      inputIterators,
+      sparkConf,
+      rootNode,
+      pipelineTime,
+      updateNativeMetrics,
+      partitionIndex,
+      materializeInput,
+      enableCudf,
+      supportsValueStreamDynamicFilter,
+      Map.empty
+    )
+  }
+
+  override def genFinalStageIterator(
+      context: TaskContext,
+      inputIterators: Seq[Iterator[ColumnarBatch]],
+      sparkConf: SparkConf,
+      rootNode: PlanNode,
+      pipelineTime: SQLMetric,
+      updateNativeMetrics: IMetrics => Unit,
+      partitionIndex: Int,
+      materializeInput: Boolean,
+      enableCudf: Boolean,
+      supportsValueStreamDynamicFilter: Boolean,
+      fsConf: Map[String, String]): Iterator[ColumnarBatch] = {
+    val extraConf = VeloxIteratorApi
+      .buildExtraConf(fsConf, enableCudf, supportsValueStreamDynamicFilter)
+      .asJava
     val transKernel = NativePlanEvaluator.create(BackendsApiManager.getBackendName, extraConf)
     val columnarNativeIterator =
       inputIterators.map {
@@ -303,6 +354,21 @@ class VeloxIteratorApi extends IteratorApi with Logging {
 }
 
 object VeloxIteratorApi {
+  private[gluten] def buildExtraConf(
+      fsConf: Map[String, String],
+      enableCudf: Boolean,
+      supportsValueStreamDynamicFilter: Boolean): Map[String, String] = {
+    val dynamicFilterConf =
+      if (supportsValueStreamDynamicFilter) {
+        Map.empty[String, String]
+      } else {
+        Map(VeloxConfig.VALUE_STREAM_DYNAMIC_FILTER_ENABLED.key -> "false")
+      }
+    val controlConf =
+      Map(GlutenConfig.COLUMNAR_CUDF_ENABLED.key -> enableCudf.toString) ++ dynamicFilterConf
+    fsConf.filter { case (key, _) => key.startsWith("spark.hadoop.fs.") } ++ controlConf
+  }
+
   // lookup table to translate '0' -> 0 ... 'F'/'f' -> 15
   private val unhexDigits = {
     val array = Array.fill[Byte](128)(-1)

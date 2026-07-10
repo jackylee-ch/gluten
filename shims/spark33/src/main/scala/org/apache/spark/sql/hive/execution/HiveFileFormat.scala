@@ -122,7 +122,7 @@ class HiveFileFormat(fileSinkConf: FileSinkDesc)
       }
 
       val nativeConf =
-        GlutenFormatFactory(nativeFormat).nativeConf(tableOptions, compressionCodec)
+        GlutenFormatFactory(nativeFormat).nativeConf(sparkSession, tableOptions, compressionCodec)
 
       new OutputWriterFactory {
         private val jobConf = new SerializableJobConf(new JobConf(conf))

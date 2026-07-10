@@ -17,25 +17,32 @@
 
 #include "config/GlutenConfig.h"
 
-#include <boost/regex.hpp>
 #include <jni.h>
-#include <optional>
 #include "compute/ProtobufUtils.h"
 #include "config.pb.h"
 #include "jni/JniError.h"
 
-namespace {
+namespace gluten {
 
 std::optional<boost::regex> getRedactionRegex(const std::unordered_map<std::string, std::string>& conf) {
   auto it = conf.find(gluten::kSparkRedactionRegex);
   if (it != conf.end()) {
-    return boost::regex(it->second);
+    try {
+      return boost::regex(it->second);
+    } catch (const boost::regex_error&) {
+      // Invalid user patterns must not expose configuration values.
+      return boost::regex(".*");
+    }
   }
   return std::nullopt;
 }
-} // namespace
 
-namespace gluten {
+bool shouldRedactConfigKey(std::string_view key, const std::optional<boost::regex>& redactionRegex) {
+  if (key == kUGITokens || key == kUGIUserName) {
+    return true;
+  }
+  return redactionRegex && boost::regex_search(key.begin(), key.end(), *redactionRegex);
+}
 
 std::unordered_map<std::string, std::string>
 parseConfMap(JNIEnv* env, const uint8_t* planData, const int32_t planDataLength) {
@@ -67,7 +74,7 @@ std::string printConfig(const std::unordered_map<std::string, std::string>& conf
   auto redactionRegex = getRedactionRegex(conf);
 
   for (const auto& [k, v] : conf) {
-    if (redactionRegex && boost::regex_match(k, *redactionRegex)) {
+    if (shouldRedactConfigKey(k, redactionRegex)) {
       oss << " [" << k << ", " << kSparkRedactionString << "]\n";
     } else {
       oss << " [" << k << ", " << v << "]\n";

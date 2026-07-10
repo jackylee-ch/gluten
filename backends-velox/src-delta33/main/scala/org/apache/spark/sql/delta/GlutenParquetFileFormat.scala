@@ -62,7 +62,7 @@ class GlutenParquetFileFormat
     conf.set(ParquetOutputFormat.COMPRESSION, parquetOptions.compressionCodecClassName)
     val nativeConf =
       GlutenFormatFactory("parquet")
-        .nativeConf(options, parquetOptions.compressionCodecClassName)
+        .nativeConf(sparkSession, options, parquetOptions.compressionCodecClassName)
 
     new OutputWriterFactory {
       override def getFileExtension(context: TaskAttemptContext): String = {

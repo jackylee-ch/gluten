@@ -44,6 +44,13 @@ trait GlutenFormatWriterInjects {
       options: Map[String, String],
       compressionCodec: String): java.util.Map[String, String]
 
+  def nativeConf(
+      sparkSession: SparkSession,
+      options: Map[String, String],
+      compressionCodec: String): java.util.Map[String, String] = {
+    nativeConf(options, compressionCodec)
+  }
+
   def formatName: String
 }
 

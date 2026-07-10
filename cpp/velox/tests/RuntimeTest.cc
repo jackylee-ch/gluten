@@ -19,8 +19,17 @@
 
 #include <gtest/gtest.h>
 #include "compute/VeloxBackend.h"
+#include "config/GlutenConfig.h"
+#include "config/VeloxConfig.h"
 #include "memory.pb.h"
 #include "threads/ThreadInitializer.h"
+#include "utils/ConfigExtractor.h"
+#include "utils/VeloxWholeStageDumper.h"
+#include "velox/connectors/hive/HiveConfig.h"
+#include "velox/connectors/hive/storage_adapters/s3fs/S3Config.h"
+#ifdef ENABLE_GCS
+#include "velox/connectors/hive/storage_adapters/gcs/GcsFileSystem.h"
+#endif
 
 namespace gluten {
 
@@ -160,13 +169,125 @@ TEST(TestRuntime, CreateRuntime) {
 }
 
 TEST(TestRuntime, CreateVeloxRuntime) {
-  VeloxBackend::create(AllocationListener::noop(), {});
+  VeloxBackend::create(
+      AllocationListener::noop(), {{kLoadQuantum, "123456"}, {"spark.hadoop.fs.s3a.path.style.access", "true"}});
   auto mm = MemoryManager::create(kVeloxBackendKind, AllocationListener::noop());
   auto tm = ThreadManager::create(kVeloxBackendKind, ThreadInitializer::noop());
-  auto runtime = Runtime::create(kVeloxBackendKind, mm, tm);
+  auto runtime = Runtime::create(kVeloxBackendKind, mm, tm, {{"spark.hadoop.fs.s3a.path.style.access", "false"}});
   ASSERT_EQ(typeid(*runtime), typeid(VeloxRuntime));
+  const auto* veloxRuntime = dynamic_cast<VeloxRuntime*>(runtime);
+  const auto hiveConnector = facebook::velox::connector::getConnector(veloxRuntime->connectorIds().hive);
+  ASSERT_NE(hiveConnector, nullptr);
+  EXPECT_EQ(
+      hiveConnector->connectorConfig()
+          ->get<std::string>(facebook::velox::connector::hive::HiveConfig::kLoadQuantum)
+          .value(),
+      "123456");
+#ifdef ENABLE_S3
+  EXPECT_EQ(
+      hiveConnector->connectorConfig()
+          ->get<std::string>(facebook::velox::filesystems::S3Config::baseConfigKey(
+              facebook::velox::filesystems::S3Config::Keys::kPathStyleAccess))
+          .value(),
+      "false");
+#endif
   Runtime::release(runtime);
   ThreadManager::release(tm);
+}
+
+TEST(TestRuntime, MergeFileSystemConfigsPreservesBackendTuning) {
+  const auto backendConf =
+      std::make_shared<facebook::velox::config::ConfigBase>(std::unordered_map<std::string, std::string>{
+          {kLoadQuantum, "123456"},
+          {"spark.hadoop.fs.s3a.access.key", "backend-access-key"},
+          {"spark.sql.unrelated", "backend-value"}});
+  const auto runtimeConf =
+      std::make_shared<facebook::velox::config::ConfigBase>(std::unordered_map<std::string, std::string>{
+          {"spark.hadoop.fs.s3a.access.key", "runtime-access-key"},
+          {"spark.hadoop.fs.azure.account.key.example", "runtime-abfs-key"},
+          {"spark.sql.unrelated", "runtime-value"}});
+
+  const auto merged = mergeFileSystemConfigs(backendConf, runtimeConf);
+
+  EXPECT_EQ(merged->get<std::string>(kLoadQuantum).value(), "123456");
+  EXPECT_EQ(merged->get<std::string>("spark.hadoop.fs.s3a.access.key").value(), "runtime-access-key");
+  EXPECT_EQ(merged->get<std::string>("spark.hadoop.fs.azure.account.key.example").value(), "runtime-abfs-key");
+  EXPECT_EQ(merged->get<std::string>("spark.sql.unrelated").value(), "backend-value");
+}
+
+#ifdef ENABLE_ABFS
+TEST(TestRuntime, ExtractsRuntimeAbfsConfig) {
+  const auto backendConf =
+      std::make_shared<facebook::velox::config::ConfigBase>(std::unordered_map<std::string, std::string>{});
+  const auto runtimeConf = std::make_shared<facebook::velox::config::ConfigBase>(
+      std::unordered_map<std::string, std::string>{{"spark.hadoop.fs.azure.account.key.example", "runtime-abfs-key"}});
+
+  const auto hiveConfig =
+      createHiveConnectorConfig(mergeFileSystemConfigs(backendConf, runtimeConf), FileSystemType::kAll);
+
+  EXPECT_EQ(hiveConfig->get<std::string>("fs.azure.account.key.example").value(), "runtime-abfs-key");
+}
+#endif
+
+#ifdef ENABLE_GCS
+TEST(TestRuntime, ExtractsValidRuntimeGcsConfig) {
+  const auto backendConf =
+      std::make_shared<facebook::velox::config::ConfigBase>(std::unordered_map<std::string, std::string>{});
+  const auto runtimeConf =
+      std::make_shared<facebook::velox::config::ConfigBase>(std::unordered_map<std::string, std::string>{
+          {"spark.hadoop.fs.gs.storage.root.url", "https://storage.example.test"},
+          {"spark.hadoop.fs.gs.auth.type", "SERVICE_ACCOUNT_JSON_KEYFILE"},
+          {"spark.hadoop.fs.gs.auth.service.account.json.keyfile", "/tmp/gcs-key.json"}});
+
+  const auto hiveConfig =
+      createHiveConnectorConfig(mergeFileSystemConfigs(backendConf, runtimeConf), FileSystemType::kAll);
+
+  EXPECT_EQ(
+      hiveConfig->get<std::string>(facebook::velox::connector::hive::HiveConfig::kGcsEndpoint).value(),
+      "https://storage.example.test");
+  EXPECT_EQ(
+      hiveConfig->get<std::string>(facebook::velox::connector::hive::HiveConfig::kGcsCredentialsPath).value(),
+      "/tmp/gcs-key.json");
+}
+
+TEST(TestRuntime, InvalidRuntimeGcsConfigDoesNotPoisonOtherFileSystems) {
+  const auto backendConf =
+      std::make_shared<facebook::velox::config::ConfigBase>(std::unordered_map<std::string, std::string>{});
+  const auto runtimeConf =
+      std::make_shared<facebook::velox::config::ConfigBase>(std::unordered_map<std::string, std::string>{
+          {"spark.hadoop.fs.s3a.access.key", "runtime-access-key"},
+          {"spark.hadoop.fs.gs.auth.type", "SERVICE_ACCOUNT_JSON_KEYFILE"}});
+
+  const auto merged = mergeFileSystemConfigs(backendConf, runtimeConf);
+  const auto hiveConfig = createHiveConnectorConfig(merged, FileSystemType::kAll);
+
+  EXPECT_EQ(merged->get<std::string>("spark.hadoop.fs.s3a.access.key").value(), "runtime-access-key");
+  EXPECT_EQ(
+      hiveConfig->get<std::string>(facebook::velox::connector::hive::HiveConfig::kGcsAuthAccessTokenProvider).value(),
+      kInvalidGcsCredentialsProviderName);
+  EXPECT_EQ(
+      hiveConfig->get<std::string>(facebook::velox::connector::hive::HiveConfig::kGcsEndpoint).value(),
+      kInvalidGcsEndpoint);
+  EXPECT_THROW(createHiveConnectorConfig(runtimeConf, FileSystemType::kGcs), GlutenException);
+
+  facebook::velox::filesystems::GcsFileSystem gcsFileSystem("gluten-invalid-runtime-config", hiveConfig);
+  EXPECT_THROW(gcsFileSystem.initializeClient(), GlutenException);
+}
+#endif
+
+TEST(TestRuntime, DumpConfUsesEachSectionsOwnRedactionRegex) {
+  const std::string backendSecret = "backend-secret-value";
+  const std::string sessionSecret = "session-secret-value";
+  const auto content = formatConfigForDump(
+      {{kSparkRedactionRegex, "backend[.]credential"}, {"backend.credential", backendSecret}},
+      {{kSparkRedactionRegex, "session[.]credential"},
+       {"session.credential", sessionSecret},
+       {kUGITokens, "ugi-token-value"}});
+
+  EXPECT_EQ(content.find(backendSecret), std::string::npos);
+  EXPECT_EQ(content.find(sessionSecret), std::string::npos);
+  EXPECT_EQ(content.find("ugi-token-value"), std::string::npos);
+  EXPECT_NE(content.find(kSparkRedactionString), std::string::npos);
 }
 
 TEST(TestRuntime, GetResultIterator) {

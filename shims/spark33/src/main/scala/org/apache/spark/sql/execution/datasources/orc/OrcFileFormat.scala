@@ -85,7 +85,8 @@ class OrcFileFormat extends FileFormat with DataSourceRegister with Serializable
 
     if (sparkSession.sparkContext.getLocalProperty("isNativeApplicable") == "true") {
       val nativeConf =
-        GlutenFormatFactory(shortName()).nativeConf(options, orcOptions.compressionCodec)
+        GlutenFormatFactory(shortName())
+          .nativeConf(sparkSession, options, orcOptions.compressionCodec)
 
       new OutputWriterFactory {
         override def getFileExtension(context: TaskAttemptContext): String = {

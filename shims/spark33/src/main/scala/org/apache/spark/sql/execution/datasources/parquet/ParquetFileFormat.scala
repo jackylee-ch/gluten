@@ -88,7 +88,7 @@ class ParquetFileFormat extends FileFormat with DataSourceRegister with Logging 
       conf.set(ParquetOutputFormat.COMPRESSION, parquetOptions.compressionCodecClassName)
       val nativeConf =
         GlutenFormatFactory(shortName())
-          .nativeConf(writeOptions, parquetOptions.compressionCodecClassName)
+          .nativeConf(sparkSession, writeOptions, parquetOptions.compressionCodecClassName)
 
       new OutputWriterFactory {
         override def getFileExtension(context: TaskAttemptContext): String = {

@@ -22,6 +22,10 @@
 
 namespace gluten {
 
+std::string formatConfigForDump(
+    const std::unordered_map<std::string, std::string>& backendConfMap,
+    const std::unordered_map<std::string, std::string>& sessionConfMap);
+
 class VeloxWholeStageDumper final : public WholeStageDumper {
  public:
   VeloxWholeStageDumper(

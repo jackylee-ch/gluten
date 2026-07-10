@@ -20,6 +20,12 @@
 #include "ConfigExtractor.h"
 #include <stdexcept>
 
+#ifdef ENABLE_GCS
+#include <mutex>
+#include "velox/connectors/hive/storage_adapters/gcs/GcsOAuthCredentialsProvider.h"
+#include "velox/connectors/hive/storage_adapters/gcs/RegisterGcsFileSystem.h"
+#endif
+
 #include "config/VeloxConfig.h"
 #include "utils/Exception.h"
 #include "utils/Macros.h"
@@ -31,6 +37,29 @@
 namespace gluten {
 
 namespace {
+
+#ifdef ENABLE_GCS
+constexpr std::string_view kInvalidGcsRuntimeConfig = "spark.gluten.internal.invalidGcsRuntimeConfiguration";
+
+class InvalidGcsCredentialsProvider final : public facebook::velox::filesystems::GcsOAuthCredentialsProvider {
+ public:
+  std::shared_ptr<facebook::velox::filesystems::gcs::oauth2::Credentials> getCredentials(
+      const std::string& /* bucket */) override {
+    throw GlutenException("Inconsistent per-runtime GCS configuration");
+  }
+};
+
+void ensureInvalidGcsCredentialsProviderRegistered() {
+  static std::once_flag once;
+  std::call_once(once, [] {
+    facebook::velox::filesystems::registerGcsOAuthCredentialsProvider(
+        std::string(kInvalidGcsCredentialsProviderName),
+        [](const std::shared_ptr<facebook::velox::connector::hive::HiveConfig>&) {
+          return std::make_shared<InvalidGcsCredentialsProvider>();
+        });
+  });
+}
+#endif
 
 void getS3HiveConfig(
     std::shared_ptr<facebook::velox::config::ConfigBase> conf,
@@ -180,6 +209,14 @@ void getGcsHiveConfig(
     FileSystemType fsType,
     std::unordered_map<std::string, std::string>& hiveConfMap) {
 #ifdef ENABLE_GCS
+  if (conf->get<bool>(std::string(kInvalidGcsRuntimeConfig), false)) {
+    ensureInvalidGcsCredentialsProviderRegistered();
+    hiveConfMap[facebook::velox::connector::hive::HiveConfig::kGcsAuthAccessTokenProvider] =
+        kInvalidGcsCredentialsProviderName;
+    hiveConfMap[facebook::velox::connector::hive::HiveConfig::kGcsEndpoint] = kInvalidGcsEndpoint;
+    return;
+  }
+
   // https://github.com/GoogleCloudDataproc/hadoop-connectors/blob/master/gcs/CONFIGURATION.md#api-client-configuration
   auto gsStorageRootUrl = conf->get<std::string>("spark.hadoop.fs.gs.storage.root.url");
   if (gsStorageRootUrl.has_value()) {
@@ -245,6 +282,42 @@ std::string parquetSessionProperty(std::string_view key) {
 }
 
 } // namespace
+
+std::shared_ptr<facebook::velox::config::ConfigBase> mergeFileSystemConfigs(
+    const std::shared_ptr<facebook::velox::config::ConfigBase>& backendConf,
+    const std::shared_ptr<facebook::velox::config::ConfigBase>& runtimeConf) {
+  constexpr std::string_view kSparkHadoopFsPrefix = "spark.hadoop.fs.";
+
+  auto merged = backendConf->rawConfigs();
+  for (const auto& [key, value] : runtimeConf->rawConfigs()) {
+    if (key.starts_with(kSparkHadoopFsPrefix)) {
+      merged.insert_or_assign(key, value);
+    }
+  }
+
+#ifdef ENABLE_GCS
+  constexpr std::string_view kSparkHadoopGcsPrefix = "spark.hadoop.fs.gs.";
+  try {
+    std::unordered_map<std::string, std::string> ignored;
+    auto validationConfig = merged;
+    getGcsHiveConfig(
+        std::make_shared<facebook::velox::config::ConfigBase>(std::move(validationConfig)),
+        FileSystemType::kGcs,
+        ignored);
+  } catch (const GlutenException&) {
+    LOG(WARNING) << "Rejecting inconsistent per-runtime GCS configuration for GCS access";
+    merged = backendConf->rawConfigs();
+    for (const auto& [key, value] : runtimeConf->rawConfigs()) {
+      if (key.starts_with(kSparkHadoopFsPrefix) && !key.starts_with(kSparkHadoopGcsPrefix)) {
+        merged.insert_or_assign(key, value);
+      }
+    }
+    merged.insert_or_assign(std::string(kInvalidGcsRuntimeConfig), "true");
+  }
+#endif
+
+  return std::make_shared<facebook::velox::config::ConfigBase>(std::move(merged));
+}
 
 std::shared_ptr<facebook::velox::config::ConfigBase> createHiveConnectorSessionConfig(
     const std::shared_ptr<facebook::velox::config::ConfigBase>& conf) {

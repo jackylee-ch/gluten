@@ -17,8 +17,10 @@
 
 #pragma once
 
+#include <boost/regex.hpp>
 #include <jni.h>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -117,6 +119,10 @@ std::unordered_map<std::string, std::string>
 parseConfMap(JNIEnv* env, const uint8_t* planData, const int32_t planDataLength);
 
 std::string normalizeSessionTimezone(std::string_view sessionTimezone);
+
+std::optional<boost::regex> getRedactionRegex(const std::unordered_map<std::string, std::string>& conf);
+
+bool shouldRedactConfigKey(std::string_view key, const std::optional<boost::regex>& redactionRegex);
 
 std::string printConfig(const std::unordered_map<std::string, std::string>& conf);
 } // namespace gluten

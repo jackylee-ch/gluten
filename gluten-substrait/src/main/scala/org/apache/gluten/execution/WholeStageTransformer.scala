@@ -322,7 +322,8 @@ case class WholeStageTransformer(child: SparkPlan, materializeInput: Boolean = f
       leafTransformers: Seq[LeafTransformSupport],
       wsCtx: WholeStageTransformContext,
       inputRDDs: ColumnarInputRDDsWrapper,
-      pipelineTime: SQLMetric): RDD[ColumnarBatch] = {
+      pipelineTime: SQLMetric,
+      fsConf: Map[String, String]): RDD[ColumnarBatch] = {
 
     // If these are two leaf transformers, they must have same partitions,
     // otherwise, exchange will be inserted. We should combine the two leaf
@@ -380,7 +381,8 @@ case class WholeStageTransformer(child: SparkPlan, materializeInput: Boolean = f
         wsCtx.substraitContext.registeredAggregationParams
       ),
       wsCtx.enableCudf,
-      wsCtx
+      wsCtx,
+      fsConf
     )
 
     val allInputPartitions = leafTransformers.map(_.getPartitions)
@@ -407,10 +409,11 @@ case class WholeStageTransformer(child: SparkPlan, materializeInput: Boolean = f
           GlutenConfig.get.substraitPlanLogLevel,
           s"$nodeName generating the substrait plan took: $t ms."))
     val inputRDDs = new ColumnarInputRDDsWrapper(columnarInputRDDs)
+    val fsConf = HadoopConfCollector.collect(session)
 
     val leafTransformers = findAllLeafTransformers()
     if (leafTransformers.nonEmpty) {
-      generateWholeStageRDD(leafTransformers, wsCtx, inputRDDs, pipelineTime)
+      generateWholeStageRDD(leafTransformers, wsCtx, inputRDDs, pipelineTime, fsConf)
     } else {
 
       /**
@@ -436,7 +439,8 @@ case class WholeStageTransformer(child: SparkPlan, materializeInput: Boolean = f
           wsCtx.substraitContext.registeredAggregationParams
         ),
         materializeInput,
-        inputRDDs.getPartitionLength
+        inputRDDs.getPartitionLength,
+        fsConf
       )
     }
   }

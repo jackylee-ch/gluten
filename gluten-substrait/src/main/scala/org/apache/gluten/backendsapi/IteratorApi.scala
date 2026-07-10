@@ -72,6 +72,29 @@ trait IteratorApi {
       wsContext: WholeStageTransformContext = null
   ): Iterator[ColumnarBatch]
 
+  def genFirstStageIterator(
+      inputPartition: BaseGlutenPartition,
+      context: TaskContext,
+      pipelineTime: SQLMetric,
+      updateInputMetrics: InputMetricsWrapper => Unit,
+      updateNativeMetrics: IMetrics => Unit,
+      partitionIndex: Int,
+      inputIterators: Seq[Iterator[ColumnarBatch]],
+      enableCudf: Boolean,
+      wsContext: WholeStageTransformContext,
+      fsConf: Map[String, String]): Iterator[ColumnarBatch] = {
+    genFirstStageIterator(
+      inputPartition,
+      context,
+      pipelineTime,
+      updateInputMetrics,
+      updateNativeMetrics,
+      partitionIndex,
+      inputIterators,
+      enableCudf,
+      wsContext)
+  }
+
   /**
    * Generate Iterator[ColumnarBatch] for final stage. ("Final" means it depends on other SCAN
    * inputs, maybe it was a mistake to use the word "final")
@@ -88,5 +111,31 @@ trait IteratorApi {
       materializeInput: Boolean = false,
       enableCudf: Boolean = false,
       supportsValueStreamDynamicFilter: Boolean = true): Iterator[ColumnarBatch]
+
+  def genFinalStageIterator(
+      context: TaskContext,
+      inputIterators: Seq[Iterator[ColumnarBatch]],
+      sparkConf: SparkConf,
+      rootNode: PlanNode,
+      pipelineTime: SQLMetric,
+      updateNativeMetrics: IMetrics => Unit,
+      partitionIndex: Int,
+      materializeInput: Boolean,
+      enableCudf: Boolean,
+      supportsValueStreamDynamicFilter: Boolean,
+      fsConf: Map[String, String]): Iterator[ColumnarBatch] = {
+    genFinalStageIterator(
+      context,
+      inputIterators,
+      sparkConf,
+      rootNode,
+      pipelineTime,
+      updateNativeMetrics,
+      partitionIndex,
+      materializeInput,
+      enableCudf,
+      supportsValueStreamDynamicFilter
+    )
+  }
   // scalastyle:on argcount
 }

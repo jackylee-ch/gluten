@@ -48,6 +48,45 @@ class GlutenRuntimeConfigSuite extends GlutenQueryTest with SharedSparkSession {
     }
   }
 
+  test("native configs inject the extended default redaction regex") {
+    val sessionConf = GlutenConfig.getNativeSessionConf("velox", Map.empty)
+    val backendConf = GlutenConfig.getNativeBackendConf("velox", Map.empty)
+
+    assert(
+      sessionConf(GlutenConfig.SPARK_REDACTION_REGEX) ==
+        GlutenConfig.DEFAULT_NATIVE_REDACTION_REGEX)
+    assert(
+      backendConf.get(GlutenConfig.SPARK_REDACTION_REGEX) ==
+        GlutenConfig.DEFAULT_NATIVE_REDACTION_REGEX)
+
+    val redactionRegex = GlutenConfig.DEFAULT_NATIVE_REDACTION_REGEX.r
+    Seq(
+      "spark.hadoop.fs.s3a.secret.key",
+      "spark.hadoop.fs.azure.account.key.account.dfs.core.windows.net",
+      "spark.hadoop.fs.azure.account.oauth2.client.secret.account.dfs.core.windows.net",
+      "spark.hadoop.fs.gs.auth.service.account.private.key",
+      "spark.gluten.ugi.tokens",
+      "spark.gluten.ugi.username"
+    ).foreach(key => assert(redactionRegex.findFirstIn(key).nonEmpty, key))
+  }
+
+  test("native configs preserve a user supplied redaction regex") {
+    val customRegex = "custom[.]credential"
+
+    assert(
+      GlutenConfig
+        .getNativeSessionConf(
+          "velox",
+          Map(GlutenConfig.SPARK_REDACTION_REGEX -> customRegex))(
+          GlutenConfig.SPARK_REDACTION_REGEX) == customRegex)
+    assert(
+      GlutenConfig
+        .getNativeBackendConf(
+          "velox",
+          Map(GlutenConfig.SPARK_REDACTION_REGEX -> customRegex))
+        .get(GlutenConfig.SPARK_REDACTION_REGEX) == customRegex)
+  }
+
   test("Memory manager capacity ratio config validation") {
 
     assert(GlutenConfig.MEMORY_MANAGER_CAPACITY_RATIO.defaultValue.get == 0.75)

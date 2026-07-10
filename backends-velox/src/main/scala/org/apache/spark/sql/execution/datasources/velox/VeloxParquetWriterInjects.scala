@@ -17,8 +17,12 @@
 package org.apache.spark.sql.execution.datasources.velox
 
 import org.apache.gluten.config.GlutenConfig
+import org.apache.gluten.execution.HadoopConfCollector
 
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.internal.SQLConf
+
+import java.util
 
 import scala.collection.JavaConverters.mapAsJavaMapConverter
 import scala.collection.mutable
@@ -58,6 +62,18 @@ class VeloxParquetWriterInjects extends VeloxFormatWriterInjects {
       GlutenConfig.PARQUET_WRITER_VERSION
     ).foreach(key => options.get(key).foreach(sparkOptions.put(key, _)))
     sparkOptions.asJava
+  }
+
+  override def nativeConf(
+      sparkSession: SparkSession,
+      options: Map[String, String],
+      compressionCodec: String): java.util.Map[String, String] = {
+    val sparkOptions = new util.HashMap[String, String](
+      sparkSession.withActive {
+        nativeConf(options, compressionCodec)
+      })
+    sparkOptions.putAll(HadoopConfCollector.collect(sparkSession).asJava)
+    sparkOptions
   }
 
   override val formatName: String = "parquet"

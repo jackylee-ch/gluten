@@ -20,7 +20,7 @@ import org.apache.gluten.backendsapi.BackendsApiManager
 import org.apache.gluten.columnarbatch.ColumnarBatches
 import org.apache.gluten.datasource.{VeloxDataSourceJniWrapper, VeloxDataSourceUtil}
 import org.apache.gluten.exception.GlutenException
-import org.apache.gluten.execution.BatchCarrierRow
+import org.apache.gluten.execution.{BatchCarrierRow, HadoopConfCollector}
 import org.apache.gluten.execution.datasource.GlutenRowSplitter
 import org.apache.gluten.memory.arrow.alloc.ArrowBufferAllocators
 import org.apache.gluten.runtime.Runtimes
@@ -33,12 +33,33 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.utils.SparkArrowUtil
 import org.apache.spark.sql.vectorized.ColumnarBatch
+import org.apache.spark.task.TaskResources
 
 import org.apache.arrow.c.ArrowSchema
 import org.apache.hadoop.fs.{FileStatus, Path}
 import org.apache.hadoop.mapreduce.TaskAttemptContext
 
 import java.io.IOException
+import java.util
+
+import scala.collection.JavaConverters._
+
+object VeloxFormatWriterInjects {
+  private val SparkHadoopFsPrefix = "spark.hadoop.fs."
+
+  private[velox] def runtimeFsConf(
+      nativeConf: util.Map[String, String]): util.Map[String, String] = {
+    nativeConf.asScala.filter {
+      case (key, _) => key.startsWith(SparkHadoopFsPrefix)
+    }.asJava
+  }
+
+  private[velox] def runWithTaskResources[T](sparkSession: SparkSession)(body: => T): T = {
+    sparkSession.withActive {
+      TaskResources.runUnsafe(body)
+    }
+  }
+}
 
 trait VeloxFormatWriterInjects extends GlutenFormatWriterInjectsBase {
   def createOutputWriter(
@@ -60,7 +81,10 @@ trait VeloxFormatWriterInjects extends GlutenFormatWriterInjectsBase {
       SparkArrowUtil.toArrowSchema(dataSchema, SQLConf.get.sessionLocalTimeZone)
     val cSchema = ArrowSchema.allocateNew(ArrowBufferAllocators.contextInstance())
     var dsHandle = -1L
-    val runtime = Runtimes.contextInstance(BackendsApiManager.getBackendName, "VeloxWriter")
+    val runtime = Runtimes.contextInstance(
+      BackendsApiManager.getBackendName,
+      "VeloxWriter",
+      VeloxFormatWriterInjects.runtimeFsConf(nativeConf))
     val datasourceJniWrapper = VeloxDataSourceJniWrapper.create(runtime)
     val allocator = ArrowBufferAllocators.contextInstance()
     try {
@@ -103,7 +127,9 @@ trait VeloxFormatWriterInjects extends GlutenFormatWriterInjectsBase {
       sparkSession: SparkSession,
       options: Map[String, String],
       files: Seq[FileStatus]): Option[StructType] = {
-    VeloxDataSourceUtil.readSchema(files)
+    VeloxFormatWriterInjects.runWithTaskResources(sparkSession) {
+      VeloxDataSourceUtil.readSchema(files, HadoopConfCollector.collect(sparkSession).asJava)
+    }
   }
 }
 

@@ -374,20 +374,42 @@ void VeloxBackend::initCache() {
 std::shared_ptr<facebook::velox::connector::Connector> VeloxBackend::createHiveConnector(
     const std::string& connectorId,
     folly::Executor* ioExecutor) const {
-  return std::make_shared<velox::connector::hive::HiveConnector>(connectorId, hiveConnectorConfig_, ioExecutor);
+  return createHiveConnector(connectorId, ioExecutor, hiveConnectorConfig_);
+}
+
+std::shared_ptr<facebook::velox::connector::Connector> VeloxBackend::createHiveConnector(
+    const std::string& connectorId,
+    folly::Executor* ioExecutor,
+    std::shared_ptr<const facebook::velox::config::ConfigBase> hiveConnectorConfig) const {
+  return std::make_shared<velox::connector::hive::HiveConnector>(
+      connectorId, std::move(hiveConnectorConfig), ioExecutor);
 }
 
 std::shared_ptr<facebook::velox::connector::Connector> VeloxBackend::createDeltaConnector(
     const std::string& connectorId,
     folly::Executor* ioExecutor) const {
-  return std::make_shared<delta::DeltaConnector>(connectorId, hiveConnectorConfig_, ioExecutor);
+  return createDeltaConnector(connectorId, ioExecutor, hiveConnectorConfig_);
+}
+
+std::shared_ptr<facebook::velox::connector::Connector> VeloxBackend::createDeltaConnector(
+    const std::string& connectorId,
+    folly::Executor* ioExecutor,
+    std::shared_ptr<const facebook::velox::config::ConfigBase> hiveConnectorConfig) const {
+  return std::make_shared<delta::DeltaConnector>(connectorId, std::move(hiveConnectorConfig), ioExecutor);
 }
 
 std::shared_ptr<facebook::velox::connector::Connector> VeloxBackend::createIcebergConnector(
     const std::string& connectorId,
     folly::Executor* ioExecutor) const {
+  return createIcebergConnector(connectorId, ioExecutor, hiveConnectorConfig_);
+}
+
+std::shared_ptr<facebook::velox::connector::Connector> VeloxBackend::createIcebergConnector(
+    const std::string& connectorId,
+    folly::Executor* ioExecutor,
+    std::shared_ptr<const facebook::velox::config::ConfigBase> hiveConnectorConfig) const {
   return std::make_shared<velox::connector::hive::iceberg::IcebergConnector>(
-      connectorId, hiveConnectorConfig_, ioExecutor);
+      connectorId, std::move(hiveConnectorConfig), ioExecutor);
 }
 
 std::shared_ptr<facebook::velox::connector::Connector> VeloxBackend::createValueStreamConnector(
@@ -400,8 +422,15 @@ std::shared_ptr<facebook::velox::connector::Connector> VeloxBackend::createValue
 std::shared_ptr<facebook::velox::connector::Connector> VeloxBackend::createCudfHiveConnector(
     const std::string& connectorId,
     folly::Executor* ioExecutor) const {
+  return createCudfHiveConnector(connectorId, ioExecutor, hiveConnectorConfig_);
+}
+
+std::shared_ptr<facebook::velox::connector::Connector> VeloxBackend::createCudfHiveConnector(
+    const std::string& connectorId,
+    folly::Executor* ioExecutor,
+    std::shared_ptr<const facebook::velox::config::ConfigBase> hiveConnectorConfig) const {
   facebook::velox::cudf_velox::connector::hive::CudfHiveConnectorFactory factory;
-  return factory.newConnector(connectorId, hiveConnectorConfig_, ioExecutor);
+  return factory.newConnector(connectorId, std::move(hiveConnectorConfig), ioExecutor);
 }
 #endif
 

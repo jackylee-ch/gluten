@@ -16,7 +16,7 @@
  */
 package org.apache.gluten.execution
 
-import org.apache.gluten.backendsapi.BackendsApiManager
+import org.apache.gluten.backendsapi.{BackendsApiManager, IteratorApi}
 import org.apache.gluten.config.GlutenConfig
 import org.apache.gluten.extension.ApplyStageInputStatsRule
 import org.apache.gluten.metrics.{GlutenTimeMetric, IMetrics}
@@ -64,6 +64,32 @@ class GlutenWholeStageColumnarRDD(
     wsContext: WholeStageTransformContext = null)
   extends RDD[ColumnarBatch](sc, rdds.getDependencies) {
 
+  private var _fsConf: Map[String, String] = Map.empty
+
+  def fsConf: Map[String, String] = _fsConf
+
+  def this(
+      sc: SparkContext,
+      inputPartitions: Seq[Partition],
+      rdds: ColumnarInputRDDsWrapper,
+      pipelineTime: SQLMetric,
+      updateInputMetrics: InputMetricsWrapper => Unit,
+      updateNativeMetrics: IMetrics => Unit,
+      enableCudf: Boolean,
+      wsContext: WholeStageTransformContext,
+      fsConf: Map[String, String]) = {
+    this(
+      sc,
+      inputPartitions,
+      rdds,
+      pipelineTime,
+      updateInputMetrics,
+      updateNativeMetrics,
+      enableCudf,
+      wsContext)
+    _fsConf = fsConf
+  }
+
   override def compute(split: Partition, context: TaskContext): Iterator[ColumnarBatch] = {
     GlutenTimeMetric.millis(pipelineTime) {
       _ =>
@@ -75,18 +101,32 @@ class GlutenWholeStageColumnarRDD(
         }
         val (inputPartition, inputColumnarRDDPartitions) = castNativePartition(split)
         val inputIterators = rdds.getIterators(inputColumnarRDDPartitions, context)
-        BackendsApiManager.getIteratorApiInstance.genFirstStageIterator(
+        createFirstStageIterator(
+          BackendsApiManager.getIteratorApiInstance,
           inputPartition,
           context,
-          pipelineTime,
-          updateInputMetrics,
-          updateNativeMetrics,
-          split.index,
           inputIterators,
-          enableCudf,
-          wsContext
-        )
+          split.index)
     }
+  }
+
+  private[gluten] def createFirstStageIterator(
+      iteratorApi: IteratorApi,
+      inputPartition: BaseGlutenPartition,
+      context: TaskContext,
+      inputIterators: Seq[Iterator[ColumnarBatch]],
+      partitionIndex: Int): Iterator[ColumnarBatch] = {
+    iteratorApi.genFirstStageIterator(
+      inputPartition,
+      context,
+      pipelineTime,
+      updateInputMetrics,
+      updateNativeMetrics,
+      partitionIndex,
+      inputIterators,
+      enableCudf,
+      wsContext,
+      fsConf)
   }
 
   private def castNativePartition(split: Partition): (BaseGlutenPartition, Seq[Partition]) = {

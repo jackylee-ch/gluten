@@ -16,7 +16,7 @@
  */
 package org.apache.gluten.execution
 
-import org.apache.gluten.backendsapi.BackendsApiManager
+import org.apache.gluten.backendsapi.{BackendsApiManager, IteratorApi}
 import org.apache.gluten.config.GlutenConfig
 import org.apache.gluten.extension.ApplyStageInputStatsRule
 import org.apache.gluten.metrics.{GlutenTimeMetric, IMetrics}
@@ -42,6 +42,32 @@ class WholeStageZippedPartitionsRDD(
     partitionLength: Int = 0)
   extends RDD[ColumnarBatch](sc, rdds.getDependencies) {
 
+  private var _fsConf: Map[String, String] = Map.empty
+
+  def fsConf: Map[String, String] = _fsConf
+
+  def this(
+      sc: SparkContext,
+      rdds: ColumnarInputRDDsWrapper,
+      sparkConf: SparkConf,
+      resCtx: WholeStageTransformContext,
+      pipelineTime: SQLMetric,
+      updateNativeMetrics: IMetrics => Unit,
+      materializeInput: Boolean,
+      partitionLength: Int,
+      fsConf: Map[String, String]) = {
+    this(
+      sc,
+      rdds,
+      sparkConf,
+      resCtx,
+      pipelineTime,
+      updateNativeMetrics,
+      materializeInput,
+      partitionLength)
+    _fsConf = fsConf
+  }
+
   override def compute(split: Partition, context: TaskContext): Iterator[ColumnarBatch] = {
     GlutenTimeMetric.millis(pipelineTime) {
       _ =>
@@ -53,20 +79,32 @@ class WholeStageZippedPartitionsRDD(
         }
         val partitions = split.asInstanceOf[ZippedPartitionsPartition].inputColumnarRDDPartitions
         val inputIterators: Seq[Iterator[ColumnarBatch]] = rdds.getIterators(partitions, context)
-        BackendsApiManager.getIteratorApiInstance
-          .genFinalStageIterator(
-            context,
-            inputIterators,
-            sparkConf,
-            resCtx.root,
-            pipelineTime,
-            updateNativeMetrics,
-            split.index,
-            materializeInput,
-            resCtx.enableCudf,
-            resCtx.supportsValueStreamDynamicFilter
-          )
+        createFinalStageIterator(
+          BackendsApiManager.getIteratorApiInstance,
+          context,
+          inputIterators,
+          split.index)
     }
+  }
+
+  private[gluten] def createFinalStageIterator(
+      iteratorApi: IteratorApi,
+      context: TaskContext,
+      inputIterators: Seq[Iterator[ColumnarBatch]],
+      partitionIndex: Int): Iterator[ColumnarBatch] = {
+    iteratorApi.genFinalStageIterator(
+      context,
+      inputIterators,
+      sparkConf,
+      resCtx.root,
+      pipelineTime,
+      updateNativeMetrics,
+      partitionIndex,
+      materializeInput,
+      resCtx.enableCudf,
+      resCtx.supportsValueStreamDynamicFilter,
+      fsConf
+    )
   }
 
   override def getPartitions: Array[Partition] = {

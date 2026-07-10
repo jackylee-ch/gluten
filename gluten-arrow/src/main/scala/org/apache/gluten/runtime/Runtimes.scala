@@ -18,9 +18,60 @@ package org.apache.gluten.runtime
 
 import org.apache.spark.task.TaskResources
 
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import java.util
 
+import scala.collection.JavaConverters._
+
 object Runtimes {
+
+  private val HexDigits = "0123456789abcdef".toCharArray
+  private val SparkHadoopFsPrefix = "spark.hadoop.fs."
+
+  private[gluten] def resourceId(
+      backendName: String,
+      name: String,
+      extraConf: util.Map[String, String]): String = {
+    val digest = MessageDigest.getInstance("SHA-256")
+    val sortedEntries = extraConf.asScala.toSeq.sortBy { case (key, _) => key }
+    updateLength(digest, sortedEntries.size)
+    sortedEntries.foreach {
+      case (key, value) =>
+        update(digest, key)
+        if (key.startsWith(SparkHadoopFsPrefix)) {
+          // Resource identifiers must not become stable fingerprints of filesystem credentials.
+          updateLength(digest, 0)
+        } else {
+          update(digest, value)
+        }
+    }
+    s"$backendName:$name:${toHex(digest.digest())}"
+  }
+
+  private def update(digest: MessageDigest, value: String): Unit = {
+    val bytes = value.getBytes(StandardCharsets.UTF_8)
+    updateLength(digest, bytes.length)
+    digest.update(bytes)
+  }
+
+  private def updateLength(digest: MessageDigest, length: Int): Unit = {
+    digest.update((length >>> 24).toByte)
+    digest.update((length >>> 16).toByte)
+    digest.update((length >>> 8).toByte)
+    digest.update(length.toByte)
+  }
+
+  private def toHex(bytes: Array[Byte]): String = {
+    val result = new Array[Char](bytes.length * 2)
+    bytes.indices.foreach {
+      index =>
+        val unsigned = bytes(index) & 0xff
+        result(index * 2) = HexDigits(unsigned >>> 4)
+        result(index * 2 + 1) = HexDigits(unsigned & 0xf)
+    }
+    new String(result)
+  }
 
   def contextInstance(
       backendName: String,
@@ -30,7 +81,7 @@ object Runtimes {
       throw new IllegalStateException("This method must be called in a Spark task.")
     }
     TaskResources.addResourceIfNotRegistered(
-      s"$backendName:$name:$extraConf",
+      resourceId(backendName, name, extraConf),
       () => Runtime(backendName, name, extraConf))
   }
 

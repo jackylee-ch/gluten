@@ -31,25 +31,60 @@ import java.util
 
 object VeloxDataSourceUtil {
   def readSchema(files: Seq[FileStatus]): Option[StructType] = {
+    readSchema(files, new util.HashMap[String, String]())
+  }
+
+  def readSchema(
+      files: Seq[FileStatus],
+      fsConf: util.Map[String, String]): Option[StructType] = {
     if (files.isEmpty) {
       throw new IllegalArgumentException("No input file specified")
     }
-    readSchema(files.toList.head)
+    readSchema(files.toList.head, fsConf)
   }
 
   def readSchema(file: FileStatus): Option[StructType] = {
+    readSchema(file, new util.HashMap[String, String]())
+  }
+
+  def readSchema(
+      file: FileStatus,
+      fsConf: util.Map[String, String]): Option[StructType] = {
     val allocator = ArrowBufferAllocators.contextInstance()
-    val runtime = Runtimes.contextInstance(BackendsApiManager.getBackendName, "VeloxWriter")
+    val runtime =
+      Runtimes.contextInstance(BackendsApiManager.getBackendName, "VeloxWriter", fsConf)
     val datasourceJniWrapper = VeloxDataSourceJniWrapper.create(runtime)
-    val dsHandle =
-      datasourceJniWrapper.init(file.getPath.toString, -1, new util.HashMap[String, String]())
-    val cSchema = ArrowSchema.allocateNew(allocator)
-    datasourceJniWrapper.inspectSchema(dsHandle, cSchema.memoryAddress())
+    withDataSourceResource[ArrowSchema, Option[StructType]](
+      () => datasourceJniWrapper.init(file.getPath.toString, -1, fsConf),
+      () => ArrowSchema.allocateNew(allocator),
+      (dsHandle, cSchema) => {
+        datasourceJniWrapper.inspectSchema(dsHandle, cSchema.memoryAddress())
+        Option(SparkSchemaUtil.fromArrowSchema(ArrowAbiUtil.importToSchema(allocator, cSchema)))
+      },
+      datasourceJniWrapper.close
+    )
+  }
+
+  private[datasource] def withDataSourceResource[R <: AutoCloseable, T](
+      initialize: () => Long,
+      allocate: () => R,
+      use: (Long, R) => T,
+      closeHandle: Long => Unit): T = {
+    var dsHandle: Option[Long] = None
+    var resource: R = null.asInstanceOf[R]
     try {
-      Option(SparkSchemaUtil.fromArrowSchema(ArrowAbiUtil.importToSchema(allocator, cSchema)))
+      val handle = initialize()
+      dsHandle = Some(handle)
+      resource = allocate()
+      use(handle, resource)
     } finally {
-      cSchema.close()
-      datasourceJniWrapper.close(dsHandle)
+      try {
+        if (resource != null) {
+          resource.close()
+        }
+      } finally {
+        dsHandle.foreach(closeHandle)
+      }
     }
   }
 }

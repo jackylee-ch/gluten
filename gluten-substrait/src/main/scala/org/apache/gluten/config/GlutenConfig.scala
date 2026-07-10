@@ -466,6 +466,10 @@ object GlutenConfig extends ConfigRegistry {
   val SPARK_OVERHEAD_SIZE_KEY = "spark.executor.memoryOverhead"
   val SPARK_OVERHEAD_FACTOR_KEY = "spark.executor.memoryOverheadFactor"
   val SPARK_REDACTION_REGEX = "spark.redaction.regex"
+  private[gluten] val DEFAULT_NATIVE_REDACTION_REGEX =
+    "(?i)secret|password|token|access[.]?key|fs[.]azure[.]account[.]key|" +
+      "fs[.]gs[.].*private[.]key|oauth2[.]client[.]secret|" +
+      "spark[.]gluten[.]ugi[.](?:username|tokens)"
   val SPARK_SHUFFLE_FILE_BUFFER = "spark.shuffle.file.buffer"
   val SPARK_UNSAFE_SORTER_SPILL_READER_BUFFER_SIZE = "spark.unsafe.sorter.spill.reader.buffer.size"
   val SPARK_SHUFFLE_SPILL_DISK_WRITE_BUFFER_SIZE = "spark.shuffle.spill.diskWriteBufferSize"
@@ -562,6 +566,7 @@ object GlutenConfig extends ConfigRegistry {
         GLUTEN_COLUMNAR_TO_ROW_MEM_THRESHOLD.key,
         GLUTEN_COLUMNAR_TO_ROW_MEM_THRESHOLD.defaultValue.get.toString),
       (SPARK_SHUFFLE_SPILL_COMPRESS, SPARK_SHUFFLE_SPILL_COMPRESS_DEFAULT.toString),
+      (SPARK_REDACTION_REGEX, DEFAULT_NATIVE_REDACTION_REGEX),
       (SQLConf.MAP_KEY_DEDUP_POLICY.key, SQLConf.MAP_KEY_DEDUP_POLICY.defaultValueString),
       (SQLConf.SESSION_LOCAL_TIMEZONE.key, SQLConf.SESSION_LOCAL_TIMEZONE.defaultValueString),
       (SQLConf.ANSI_ENABLED.key, SQLConf.ANSI_ENABLED.defaultValueString)
@@ -657,6 +662,7 @@ object GlutenConfig extends ConfigRegistry {
       ("spark.gluten.velox.awsSdkLogLevel", "FATAL"),
       ("spark.gluten.velox.s3UseProxyFromEnv", "false"),
       ("spark.gluten.velox.s3PayloadSigningPolicy", "Never"),
+      (SPARK_REDACTION_REGEX, DEFAULT_NATIVE_REDACTION_REGEX),
       (SQLConf.SESSION_LOCAL_TIMEZONE.key, SQLConf.SESSION_LOCAL_TIMEZONE.defaultValueString)
     ).foreach { case (k, defaultValue) => nativeConfMap.put(k, conf.getOrElse(k, defaultValue)) }
 

@@ -42,8 +42,11 @@ class VeloxParquetDataSourceGCS final : public VeloxParquetDataSource {
       std::shared_ptr<arrow::Schema> schema)
       : VeloxParquetDataSource(filePath, veloxPool, sinkPool, schema) {}
 
-  void initSink(const std::unordered_map<std::string, std::string>& /* sparkConfs */) override {
-    auto fileSystem = filesystems::getFileSystem(filePath_, nullptr);
+  void initSink(const std::unordered_map<std::string, std::string>& sparkConfs) override {
+    auto hiveConf = createHiveConnectorConfig(
+        std::make_shared<facebook::velox::config::ConfigBase>(std::unordered_map<std::string, std::string>(sparkConfs)),
+        FileSystemType::kGcs);
+    auto fileSystem = filesystems::getFileSystem(filePath_, hiveConf);
     auto* gcsFileSystem = dynamic_cast<filesystems::GcsFileSystem*>(fileSystem.get());
     sink_ = std::make_unique<dwio::common::WriteFileSink>(
         gcsFileSystem->openFileForWrite(filePath_, {{}, sinkPool_.get()}), filePath_);

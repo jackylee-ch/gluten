@@ -61,11 +61,12 @@ VeloxWholeStageDumper::VeloxWholeStageDumper(
     facebook::velox::memory::MemoryPool* aggregatePool)
     : taskInfo_(taskInfo), saveDir_(saveDir), batchSize_(batchSize), pool_(aggregatePool) {}
 
-void VeloxWholeStageDumper::dumpConf(const std::unordered_map<std::string, std::string>& confMap) {
-  const auto& backendConfMap = VeloxBackend::get()->getBackendConf()->rawConfigs();
+std::string formatConfigForDump(
+    const std::unordered_map<std::string, std::string>& backendConfMap,
+    const std::unordered_map<std::string, std::string>& sessionConfMap) {
   auto allConfMap = backendConfMap;
 
-  for (const auto& pair : confMap) {
+  for (const auto& pair : sessionConfMap) {
     allConfMap.insert_or_assign(pair.first, pair.second);
   }
 
@@ -81,18 +82,28 @@ void VeloxWholeStageDumper::dumpConf(const std::unordered_map<std::string, std::
 
   // Dump backend conf.
   out << "[Backend Conf]" << std::endl;
+  const auto backendRedactionRegex = getRedactionRegex(backendConfMap);
   for (const auto& pair : backendConfMap) {
-    out << std::left << std::setw(maxKeyLength + 1) << pair.first << ' ' << pair.second << std::endl;
+    const auto& value = shouldRedactConfigKey(pair.first, backendRedactionRegex) ? kSparkRedactionString : pair.second;
+    out << std::left << std::setw(maxKeyLength + 1) << pair.first << ' ' << value << std::endl;
   }
 
   // Dump session conf.
   out << std::endl << "[Session Conf]" << std::endl;
-  for (const auto& pair : confMap) {
-    out << std::left << std::setw(maxKeyLength + 1) << pair.first << ' ' << pair.second << std::endl;
+  const auto sessionRedactionRegex = getRedactionRegex(sessionConfMap);
+  for (const auto& pair : sessionConfMap) {
+    const auto& value = shouldRedactConfigKey(pair.first, sessionRedactionRegex) ? kSparkRedactionString : pair.second;
+    out << std::left << std::setw(maxKeyLength + 1) << pair.first << ' ' << value << std::endl;
   }
 
+  return out.str();
+}
+
+void VeloxWholeStageDumper::dumpConf(const std::unordered_map<std::string, std::string>& confMap) {
+  const auto& backendConfMap = VeloxBackend::get()->getBackendConf()->rawConfigs();
+
   const auto fileName = fmt::format("conf_{}_{}_{}.ini", taskInfo_.stageId, taskInfo_.partitionId, taskInfo_.vId);
-  dumpToStorage(saveDir_, fileName, out.str());
+  dumpToStorage(saveDir_, fileName, formatConfigForDump(backendConfMap, confMap));
 }
 
 void VeloxWholeStageDumper::dumpPlan(const std::string& planJson) {
