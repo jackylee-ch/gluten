@@ -163,6 +163,19 @@ add_dependencies(gluten jni_proto)
 if(NOT CMAKE_SYSTEM_NAME MATCHES "Darwin")
   target_link_options(
     gluten PRIVATE -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/symbols.map)
+  # libgluten statically links libstdc++ (see dev/vcpkg/toolchain.cmake's
+  # -static-libstdc++). Without -Bsymbolic, the C++ runtime symbols libgluten
+  # exports at default visibility can be interposed at load time by another
+  # libstdc++ already present in the process (e.g. the system gcc-11
+  # libstdc++.so.6 loaded inside the centos-9 image). In particular the
+  # std::locale::id data objects that index the facet table get interposed, so
+  # libgluten looks up a num_put/codecvt facet under the wrong id, dereferences a
+  # bogus facet pointer, and crashes with SIGSEGV during Velox backend
+  # initialization. -Bsymbolic (not just -functions: the id objects are data)
+  # binds libgluten's own references to its internal definitions, removing the
+  # cross-libstdc++ interposition and matching how libvelox is already protected
+  # by its "local: *" symbol map.
+  target_link_options(gluten PRIVATE -Wl,-Bsymbolic)
 endif()
 
 if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.0)

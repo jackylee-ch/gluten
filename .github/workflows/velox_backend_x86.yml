@@ -99,7 +99,7 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       SPARK_TESTING: true
-    container: apache/gluten:centos-8-jdk17
+    container: apache/gluten:centos-9-jdk17
     steps:
       - uses: actions/checkout@v4
       - name: Download All Artifacts
@@ -109,13 +109,10 @@ jobs:
           path: ./cpp/build/
       - name: Prepare
         run: |
-          # Spark 4.1 python UDF tests require Python >= 3.10 which is not packaged
-          # for CentOS 8; install it via miniconda instead.
-          curl -fsSL -o /tmp/miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-py311_24.7.1-0-Linux-x86_64.sh && \
-          bash /tmp/miniconda.sh -b -p /opt/miniconda3 && \
-          ln -sf /opt/miniconda3/bin/python3.11 /usr/bin/python3 && \
-          ln -sf /opt/miniconda3/bin/pip3 /usr/bin/pip3 && \
-          python3 --version && \
+          dnf install -y python3.11 python3.11-pip python3.11-devel && \
+          ls -la /usr/bin/python3.11 && \
+          alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 && \
+          alternatives --set python3 /usr/bin/python3.11 && \
           pip3 install setuptools==77.0.3 && \
           pip3 install pyspark==3.5.5 cython && \
           pip3 install pandas==2.2.3 pyarrow==20.0.0
@@ -180,7 +177,7 @@ jobs:
       SPARK_TESTING: true
       LANG: C.UTF-8 #TODO remove after image update
       LC_ALL: C.UTF-8
-    container: apache/gluten:centos-8-jdk17
+    container: apache/gluten:centos-9-jdk17
     steps:
       - uses: actions/checkout@v4
       - name: Download All Artifacts
