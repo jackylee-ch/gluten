@@ -30,7 +30,7 @@ class VeloxDeltaConfig(conf: SQLConf) extends GlutenCoreConfig(conf) {
 
 object VeloxDeltaConfig extends ConfigRegistry {
 
-  def get: VeloxDeltaConfig = {
+  override def get: VeloxDeltaConfig = {
     new VeloxDeltaConfig(SQLConf.get)
   }
 
