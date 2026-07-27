@@ -393,9 +393,12 @@ Once built successfully, hudi features will be included in gluten-velox-bundle-X
 
 # Coverage
 
-Spark3.3 has 387 functions in total. ~240 are commonly used. To get the support status of all Spark built-in functions, please refer to [Velox Backend's Supported Operators & Functions](../velox-backend-support-progress.md).
+Spark 3.5 exposes 435 built-in functions across the scalar, aggregate, window and generator categories.
+For the per-operator and per-function support status, see
+[Velox Backend's Supported Operators & Functions](../velox-backend-support-progress.md).
 
-> Velox doesn't support [ANSI mode](https://spark.apache.org/docs/latest/sql-ref-ansi-compliance.html)), so as Gluten. Once ANSI mode is enabled in Spark config, Gluten will fallback to Vanilla Spark.
+> Gluten falls back the whole plan when [ANSI mode](https://spark.apache.org/docs/latest/sql-ref-ansi-compliance.html)
+> is enabled, controlled by `spark.gluten.sql.ansiFallback.enabled` (default true).
 
 To identify what can be offloaded in a query and detailed fallback reasons, user can follow below steps to retrieve corresponding logs.
 
