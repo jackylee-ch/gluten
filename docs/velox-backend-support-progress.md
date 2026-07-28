@@ -21,6 +21,9 @@ the code that makes the decision, so a reader can re-verify a row instead of tru
 3. [Operator support](#3-operator-support)
 4. [Function support](#4-function-support)
 5. [Cross-cutting fallback triggers](#5-cross-cutting-fallback-triggers)
+6. [Diagnosing a fallback](#6-diagnosing-a-fallback)
+7. [Cross-Spark-version notes](#7-cross-spark-version-notes)
+8. [Regenerating and re-verifying this page](#8-regenerating-and-re-verifying-this-page)
 
 ## Notation
 
@@ -211,7 +214,7 @@ a leading ellipsis is short for the `spark.gluten.sql.` prefix, so `...columnar.
 | `CartesianProductExec` | `CartesianProductExecTransformer` | CrossRel → `NestedLoopJoinNode` | `:103` | `...cartesianProductTransformerEnabled` | With a condition, requires `supportCartesianProductExecWithCondition()`. |
 | `BroadcastNestedLoopJoinExec` | `VeloxBroadcastNestedLoopJoinExecTransformer` | CrossRel → `NestedLoopJoinNode` | `:108` | `...columnar.broadcastJoin` + `...broadcastNestedLoopJoinTransformerEnabled` | Allows Inner/LeftOuter/RightOuter/Existence; `FullOuter` only when the condition is empty; `(LeftOuter, BuildLeft)`, `(RightOuter, BuildRight)`, `(ExistenceJoin, BuildLeft)` rejected (`BroadcastNestedLoopJoinExecTransformer.scala:148-175`). |
 | `SortExec` | `SortExecTransformer` | SortRel | `:252` | `...columnar.sort` | Sort direction limited to the four ASC/DESC × NULLS FIRST/LAST combinations; sort keys must be plain field references (`SubstraitToVeloxPlanValidator.cc:899-918`). |
-| `WindowExec` | `WindowExecTransformer` | WindowRel | `:266` | `...columnar.window` | Function allowlist and frame restrictions in `VeloxBackend.scala:394-463`: with a literal `RangeFrame` bound, `Descending` order is rejected and the sort key must be Byte/Short/Int/Long/Date; `ApproximatePercentile`, `Percentile` and `HyperLogLogPlusPlus` are excluded. Partition and sort keys must be field references. |
+| `WindowExec` | `WindowExecTransformer` | WindowRel | `:266` | `...columnar.window` | Allowed functions (`VeloxBackend.scala:449-456`): the six rank-like functions `RowNumber`/`Rank`/`CumeDist`/`DenseRank`/`PercentRank`/`NTile`; `NthValue`/`Lag`/`Lead` only when `input` is not foldable; any aggregate except `ApproximatePercentile`, `Percentile` and `HyperLogLogPlusPlus`. Every function must be an `Alias` over a window expression, else the node throws and falls back (`:400-407`). For a `RangeFrame` with a literal bound, `Descending` order is rejected and the sort key must be Byte/Short/Int/Long/Date (`:418-431`). Partition and sort keys must be plain field references, and the frame type must be `ROWS` or `RANGE` (`SubstraitToVeloxPlanValidator.cc:685-744`). |
 | `WindowGroupLimitExec` | `WindowGroupLimitExecTransformer` | WindowGroupLimitRel | `:272` | `...columnar.window.group.limit` | **Only `RowNumber`**; `Rank` and `DenseRank` fall back (`VeloxBackend.scala:387-392`). |
 | `GlobalLimitExec` | `LimitExecTransformer` | FetchRel | `:284` | `...columnar.limit` | `offset` and `count` must be non-negative. |
 | `LocalLimitExec` | `LimitExecTransformer` | FetchRel | `:290` | `...columnar.limit` | — |
@@ -547,11 +550,92 @@ Independent of any individual operator or function.
 | Scan-only mode | Only scans and filters pushed into a scan are offloaded; every other node falls back. | `spark.gluten.sql.columnar.scanOnly` (default false) | `Validators.scala:207-229`, wired at `:276` |
 | Fallback cost policy | After offloading, `ExpandFallbackPolicy` may revert an entire stage when the transition cost outweighs the benefit. | — | `ExpandFallbackPolicy.scala` |
 
-To see why a specific node fell back, enable Gluten's fallback reporting and read the
-`Native validation failed:` / `reason:` lines, or consult
-[Velox Backend Limitations](./velox-backend-limitations.md) and
+## 6. Diagnosing a fallback
+
+When a query does not offload as expected, work from the plan rather than from this page — the plan
+names the exact node and reason.
+
+**Per-query summary.** `df.fallbackSummary` returns `numGlutenNodes`, `numFallbackNodes`,
+the physical plan description, and a per-node reason map
+(`GlutenImplicits.scala:64-68`, `:230`):
+
+```scala
+import org.apache.spark.sql.execution.GlutenImplicits._
+spark.sql("SELECT ...").fallbackSummary
+```
+
+Note the caveat in that file: with AQE enabled but the query not yet materialized, the helper re-plans
+with AQE disabled to obtain a final plan, so the result can differ from the materialized query.
+
+**Validation logs.** Reasons are emitted by `GlutenFallbackReporter`
+(`gluten-substrait/src/main/scala/org/apache/spark/sql/execution/GlutenFallbackReporter.scala`). Useful
+knobs:
+
+| Config | Default | Effect |
+|--------|---------|--------|
+| `spark.gluten.sql.validation.logLevel` | `WARN` | Log level for validation failures. |
+| `spark.gluten.sql.validation.printStackOnFailure` | false | Include the stack trace of the rejecting exception. |
+| `spark.gluten.sql.validation.failFast` | true (internal) | Stop at the first failure in `doValidate()` instead of merging schema and operator results. |
+| `spark.gluten.sql.injectNativePlanStringToExplain` | false | Append the native plan string to `EXPLAIN` output. |
+| `spark.gluten.sql.debug` | false | Verbose debug logging. |
+
+**Reading the messages.** Each message shape maps to one of the checks in
+[section 1](#1-how-gluten-decides-to-offload-an-operator):
+
+| Message | Origin |
+|---------|--------|
+| `Found schema check failure for <schema>, due to: Schema / data type not supported` | check 4, `doSchemaValidate` — see [section 2](#2-data-type-support) |
+| `Validation failed with exception from: <node>, reason: ...` | check 4, a `GlutenNotSupportException` from `doValidateInternal` or expression conversion |
+| `Not supported to map spark function name to substrait function name` | expression class absent from `ExpressionMappings`, or removed by the blacklist |
+| `Scalar function name not registered: <f>` | check 5 — the Substrait name has no Velox implementation ([4.3](#43-reading-the-generated-tables)) |
+| `Scalar function <f> not registered with arguments: ...` | check 5 — the function exists but not for those argument types |
+| `Function is not supported: <f>` | check 5 — native blacklist ([4.2](#42-native-hard-limits)) |
+| `<f> was not supported in AggregateRel` | check 5 — aggregate allowlist ([4.2](#42-native-hard-limits)) |
+| `Velox backend does not support this generator: <g>` | generator allowlist ([4.2](#42-native-hard-limits)) |
+| `Function '<f>' is not fully supported. Cause: ...` | a conditional restriction from `ExpressionRestrictions` ([4.3](#43-reading-the-generated-tables)) |
+| `does not support ansi mode` | check 1, `FallbackOnANSIMode` ([section 5](#5-cross-cutting-fallback-triggers)) |
+
+See also [Velox Backend Limitations](./velox-backend-limitations.md) and
 [Troubleshooting](./velox-backend-troubleshooting.md).
 
+## 7. Cross-Spark-version notes
 
+The tables above use Spark 3.5.5 as the reference. Version differences that change offload behaviour:
 
+| Area | Difference |
+|------|------------|
+| Expression coverage | Version-specific expressions are contributed by the shim layer, so the mapped set grows with the Spark version: Spark 3.2 adds 1 scalar; 3.3 adds 9 scalar / 1 aggregate / 3 runtime-replaceable; 3.4 adds 15 / 5 / 6; 3.5 adds 15 / 5 / 8; 4.0 adds 14 / 5 / 8 (`shims/spark3x/.../Spark3xShims.scala`). |
+| Native write | `WriteFilesExec` was introduced in Spark 3.4; Gluten back-ports the class into the 3.2/3.3 shims so the `WriteFilesExecTransformer` path compiles everywhere (`shims/spark32/.../datasources/WriteFiles.scala:30-36`). The command-level `NativeWritePostRule` is registered through `GlutenFormatFactory` (`VeloxListenerApi.scala:233-234`) but is only reachable where `getExtendedColumnarPostRules()` returns it — Spark 3.2/3.3 (`Spark32Shims.scala:162-164`, `Spark33Shims.scala:259-261`); on 3.4/3.5/4.0 that list is empty. `enableNativeWriteFilesByDefault()` is true on 3.4/3.5/4.0 and false otherwise (`SparkShims.scala:175`). |
+| `WindowGroupLimitExec` | Recognised only on Spark 3.5 and 4.0 (`Spark35Shims.scala:300`, `Spark40Shims.scala:299`); the base `isWindowGroupLimitExec` returns false (`SparkShims.scala:152`), so on 3.2–3.4 the operator is never offloaded. |
+| Unit tests | `gluten-ut` has modules for spark32 through spark35 only; there is no `gluten-ut/spark40`, so Spark 4.0 behaviour is not covered by the Spark UT suites at this release. |
+| Spark 4.0 | The `spark-4.0` profile and `shims/spark40` exist but Spark 4.0-specific types (`VariantType`, collated strings) have no handling in the backend. Treat 4.0 as preview. |
 
+## 8. Regenerating and re-verifying this page
+
+The operator sections are hand-maintained. To re-derive them after code changes:
+
+1. **Operator inventory** — list the physical operators of the reference Spark version and diff against
+   sections 3.1–3.5, so no operator is silently dropped:
+
+   ```shell
+   unzip -l $SPARK_HOME/jars/spark-sql_*.jar \
+     | grep -oE 'org/apache/spark/sql/execution/[A-Za-z0-9/]*Exec\.class' \
+     | sed 's#.*/##; s#\.class##' | sort -u
+   ```
+
+2. **Offload coverage** — the authoritative lists are the `case` branches in
+   `gluten-substrait/src/main/scala/org/apache/gluten/extension/columnar/offload/OffloadSingleNodeRules.scala`
+   (legacy) and the `RasOffload.from[...]` entries in
+   `backends-velox/src/main/scala/org/apache/gluten/backendsapi/velox/VeloxRuleApi.scala` (RAS), plus the
+   per-component registrations in `backends-velox/src-{delta,hudi,iceberg,paimon}`.
+
+3. **Config gates** — `Validators.scala` (`FallbackByBackendSettings`, `FallbackByUserOptions`) lists
+   every operator-level flag; `docs/Configuration.md` carries the generated key reference.
+
+4. **Type rules** — `VeloxValidatorApi.doSchemaValidate` for the global rule; per-operator
+   `doValidateInternal` and `VeloxBackend.validate*` for the exceptions.
+
+5. **Function tables** — regenerate with `tools/scripts/gen-function-support-docs.py`
+   ([section 4](#4-function-support)). This requires a native build plus a `gluten-ut/spark35` run, so
+   the four generated files are only as fresh as their last regeneration
+   ([4.4](#44-known-inaccuracies-in-the-generated-tables-at-150)).
