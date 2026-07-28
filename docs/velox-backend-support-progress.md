@@ -402,6 +402,10 @@ Counted from the generated tables in this release:
 | Generator | 7   | 7   | 0  | 0  |
 | **Total** | **435** | **310** | **27** | **98** |
 
+Read the `S` column as an upper bound. At least four rows are `S` but reject at native validation
+([4.3](#43-reading-the-generated-tables)), because the generator defaults to `S` when no enabled test
+exercised the function.
+
 The headline sentence inside each generated file is computed as
 `total − |unsupported| − |partially supported|` over *sets*, while the table renders one row per
 function name matched by either name or expression class (`gen-function-support-docs.py:1121-1129`,
@@ -463,13 +467,15 @@ are limited to `ROWS`/`RANGE` with five bound kinds (`:619-694`); `SetRel` suppo
 ### 4.3 Reading the generated tables
 
 **A Spark expression appearing in `ExpressionMappings.scala` does not mean the function is supported.**
-That file only maps a Spark expression class to a Substrait function name
-(`gluten-substrait/src/main/scala/org/apache/gluten/expression/ExpressionMappings.scala`: 251 scalar,
-25 aggregate, 9 window and 5 runtime-replaceable `Sig` entries, plus per-Spark-version additions from
-the shims). Whether that Substrait name resolves to anything is decided later, in Velox.
+That file only maps a Spark expression class to a Substrait function name. On Spark 3.5 the resolved
+mapping holds 266 scalar, 30 aggregate, 9 window and 13 runtime-replaceable `Sig` entries — 318 distinct
+expression classes in total — of which the base file contributes 251/25/9/5 and the Spark 3.5 shim adds
+15/5/0/8. Whether the resulting Substrait name resolves to anything is decided later, in Velox.
 
-At 1.5.0 there are 18 scalar functions that are mapped on the Scala side yet unsupported at runtime,
-because the corresponding Velox `sparksql` function does not exist:
+At 1.5.0 there are 18 scalar functions that are mapped on the Scala side yet unsupported at runtime.
+Cross-checking each mapped Substrait name (after the alias table in `SubstraitParser.cc:387-407`)
+against the function names registered by `velox/functions/sparksql/registration/` on the pinned Velox
+branch gives the reason:
 
 | Function | Why |
 |----------|-----|
@@ -478,7 +484,33 @@ because the corresponding Velox `sparksql` function does not exist:
 | `elt`, `encode`, `octet_length`, `format_string`, `printf`, `space` | Not registered in `RegisterString.cpp`. |
 | `parse_url` | Not registered in `RegisterUrl.cpp` (only `url_encode`/`url_decode`). |
 | `months_between`, `timestamp_seconds` | Not registered in `RegisterDatetime.cpp` (which has `timestamp_millis`/`timestamp_micros`). |
-| `sequence`, `map_from_arrays` | Registered, but in the native blacklist ([4.2](#42-native-hard-limits)). |
+| `sequence` | Not registered under the Spark prefix — it exists only as a Presto array function, and Presto scalars are no longer registered. It is also in the native blacklist. |
+| `map_from_arrays` | Registered in `RegisterMap.cpp` (as `udf_map_allow_duplicates`), but in the native blacklist ([4.2](#42-native-hard-limits)). |
+
+Two of those rows have a second-order cause worth calling out: `printf` shares the `FormatString`
+expression class with `format_string`, so it can only ever have the same status; and `sequence` would
+still be rejected by the blacklist even if a Spark-prefixed implementation appeared.
+
+The same cross-check run in the other direction — functions the tables mark `S`/`PS` whose mapped name
+is not registered natively — turns up three false positives:
+
+| Function | Table says | Actually |
+|----------|-----------|----------|
+| `split_part` | S | In the native scalar blacklist (`SubstraitToVeloxPlanValidator.cc:61-62`) and not registered under the Spark prefix. There is no Scala-side rewrite. Falls back. |
+| `approx_percentile`, `percentile_approx` | S | `ApproximatePercentile` maps to `approx_percentile`, which is **both** in the scalar blacklist and absent from the 32-name aggregate allowlist. Velox registers it only as a Presto aggregate. Falls back. |
+| `percentile` | S | `Percentile` maps to `percentile`, absent from the aggregate allowlist. Falls back. |
+
+Contrast `approx_count_distinct`, which is correctly `S`: `HLLRewriteRule` rewrites
+`HyperLogLogPlusPlus` into `HLLAdapter`, whose mapped name `approx_distinct` **is** in the allowlist
+(`HLLRewriteRule.scala:30-56`, gated by `spark.gluten.sql.native.hyperLogLog.Aggregate`, default true).
+That rewrite is why an apparently unsupported Spark aggregate can still offload — and why reading the
+mapping alone is not enough.
+
+A further 17 aggregate rows (`any`, `any_value`, `bool_and`, `bool_or`, `count_if`, `every`,
+`grouping`, `grouping_id`, `median`, `regr_avgx`, `regr_avgy`, `regr_count`, `regr_sxx`, `regr_syy`,
+`some`, `try_avg`, `try_sum`) have no mapping at all, because Spark implements them as
+`RuntimeReplaceableAggregate` and rewrites them into other aggregates during analysis. Their `S` is
+accurate in effect — the query offloads — but it describes the replacement, not the named function.
 
 **Presto fallback applies to aggregates and window functions only.** `registerAllFunctions()`
 (`cpp/velox/operators/functions/RegistrationAllFunctions.cc:83-94`) registers Velox's `sparksql`
@@ -526,13 +558,20 @@ Function-affecting changes landed after those dates — for example `a0b7a2c23` 
 arithmetic functions regardless of ANSI configuration". Treat each table as accurate as of its own
 regeneration date, not as of the release.
 
-Two structural caveats:
+Three structural caveats:
 
 1. **Headline counts disagree with their own tables** — see [4.1](#41-counts-at-150).
 2. **Alias groups render one row per name.** `regexp`/`regexp_like`/`rlike` share `RLike`, and
    `format_string`/`printf` share `FormatString`. Status is applied per expression class, so aliases
    always agree with each other; they just multiply the row count. Verified: zero inconsistent labels
    across all 435 rows.
+3. **`S` is the default, not a positive result.** The generator marks a function `S` unless a matching
+   fallback reason appeared in the test log (`gen-function-support-docs.py:1174-1185`). A function that
+   no enabled suite exercises therefore reads as supported. That is how `split_part`,
+   `approx_percentile`, `percentile_approx` and `percentile` end up marked `S` while the native
+   validator rejects them ([4.3](#43-reading-the-generated-tables)). When a row matters, check it
+   against the native blacklist and allowlists in [4.2](#42-native-hard-limits) rather than trusting
+   the `S`.
 
 ## 5. Cross-cutting fallback triggers
 
