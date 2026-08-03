@@ -27,6 +27,7 @@ Spark 3.3.2 的 `org.apache.spark.sql.execution` 包共有 **142 个** 顶层 `*
 | **已完成 Gluten + Velox 实现** | **33** | 23% | 其中 25 个卸载至 Velox 原生执行，8 个由 Gluten 列式算子承载 |
 | **无需 Gluten + Velox 集成** | **66** | 47% | 抽象基类、AQE 调度包装、过渡节点、DDL 与元数据命令，本身不含数据面计算 |
 | 尚未实现，回退原生 Spark | 43 | 30% | 其中 31 个属产品定位之外或技术上不可向量化 |
+
 若只统计**真实参与数据处理**的算子（142 个中剔除 66 个无需集成的），则：
 
 | 数据面算子 | 数量 | 占比 |
@@ -217,99 +218,100 @@ Iceberg 的 `AppendDataExec` 与 `ReplaceDataExec` 已实现，见 1.2。
 Spark 3.3.2 的 `FunctionRegistry` 注册了 382 个内置函数表达式，加上 SQL 语法内建的 5 个
 （`!=`、`<>`、`between`、`case`、`||`）并去除 `raise_error`，统计口径为 **386 个**。
 
-| 类别 | 总数 | 已实现 | 部分实现 | 未实现 | 已实现 + 部分实现 |
-|------|-----:|-------:|--------:|------:|-----------------:|
-| Scalar Functions | 320 | 226 | 26 | 68 | 252（78.8%） |
-| Aggregate Functions | 50 | 47 | 1 | 2 | 48（**96.0%**） |
-| Window Functions | 9 | 9 | 0 | 0 | 9（**100%**） |
-| Generator Functions | 7 | 7 | 0 | 0 | 7（**100%**） |
-| **合计** | **386** | **289** | **27** | **70** | **316（81.9%）** |
-
-三个要点：
-
-1. **Window Functions 与 Generator Functions 已 100% 实现。**
-2. **Aggregate Functions 实现率 96%**，未实现的仅 `count_min_sketch` 与 `histogram_numeric`
-   两个低频函数——这是数仓场景最关键的一类。
-3. "部分实现"指函数本身已向量化，但在特定参数或配置下回退，具体限制在各分组下注明。
+| 类别 | 总数 | 已实现 | 未实现 | 实现率 |
+|------|-----:|-------:|------:|------:|
+| Scalar Functions | 320 | 251 | 69 | 78.4% |
+| Aggregate Functions | 50 | 44 | 6 | **88.0%** |
+| Window Functions | 9 | 9 | 0 | **100%** |
+| Generator Functions | 7 | 7 | 0 | **100%** |
+| **合计** | **386** | **311** | **75** | **80.6%** |
 
 ### 状态定义
 
 | 状态 | 含义 |
 |------|------|
 | 已实现 | 该 Function 可卸载至 Velox 向量化执行 |
-| 部分实现 | 可卸载，但存在同组下方注明的参数或配置限制 |
 | 未实现 | 该 Function 回退至原生 Spark 执行 |
 
-标注 `*` 的 Function 为**已知偏差**：官方清单标记为已实现，但原生校验阶段实际会拒绝，见 2.2。
+只有两档，不设"部分支持"。判定标准是**能否卸载**：只要在常规用法下可卸载即计入已实现，
+若在任何情形下都会回退则计入未实现。
 
-## 2.2 需注意的已知偏差
+少数已实现的 Function 在特定参数或配置下会回退，这类条件在所属分组的表格下方逐条列出。
+它们仍计入已实现——因为在默认配置与常规用法下确实获得向量化加速。
 
-Gluten 官方的函数支持清单由脚本从回归测试日志生成，判定逻辑为"未观测到回退即视为已实现"。
-未被测试覆盖的函数会被乐观标记。经核对源码，以下 4 个标记有误：
+三个要点：
 
-| Function | 清单标记 | 实际情况 |
-|----------|---------|---------|
-| `split_part` | 已实现 | 位于 Velox 原生标量黑名单，且未以 Spark 前缀注册。实际回退 |
-| `approx_percentile` | 已实现 | 映射名既在标量黑名单，又不在 32 名原生聚合白名单内。实际回退 |
-| `percentile_approx` | 已实现 | 同上（与 `approx_percentile` 共用 `ApproximatePercentile` 表达式类） |
-| `percentile` | 已实现 | 映射名 `percentile` 不在原生聚合白名单内。实际回退 |
+1. **Window Functions 与 Generator Functions 已 100% 实现。**
+2. **Aggregate Functions 实现率 88%**，未实现的 6 个是 `count_min_sketch`、
+   `histogram_numeric`、`try_sum`、`percentile`、`approx_percentile`、`percentile_approx`。
+3. 未实现的 75 个中，有相当一部分对实际作业没有性能影响，详见 2.2。
 
-此类偏差**仅影响性能预期，不影响结果正确性**。若核心作业依赖上述 Function，建议在 POC 阶段
-实测确认。
+## 2.2 未实现 Function 的实际影响
 
-另有 13 个 Aggregate Function（`any`、`bool_and`、`bool_or`、`count_if`、`every`、`grouping`、
-`grouping_id`、`regr_avgx`、`regr_avgy`、`regr_count`、`some`、`try_avg`、`try_sum`）在 Spark 中
-实现为 `RuntimeReplaceableAggregate`，分析阶段即被改写为其他聚合。它们标记为已实现在效果上
-正确——查询确实卸载——但描述的是改写后的结果，而非该具名 Function 本身。
+75 个未实现 Function 中，以下几类不影响批处理作业的性能：
+
+| 类别 | 数量 | 说明 |
+|------|-----:|------|
+| 常量类 | 4 | `current_date`、`current_timestamp`、`current_timezone`、`now`。Spark 优化阶段已折叠为字面量，不参与运行时计算 |
+| 已实现 Function 的别名 | 1 | `date_part` 是 `extract` 的别名，后者已实现 |
+| Structured Streaming 专用 | 2 | `session_window`、`window` |
+| 元数据 / 环境访问 | 8 | `current_catalog`、`current_database`、`current_user`、`input_file_name`、`input_file_block_start`、`input_file_block_length`、`monotonically_increasing_id`、`typeof`。语义上非计算 |
+| 原理上不可向量化 | 4 | `aes_encrypt`、`aes_decrypt`（加解密）、`reflect`、`java_method`（JVM 反射调用） |
+
+剔除上述 19 个之后，**真正构成功能缺口的为 56 个**，集中在三个方向：
+
+- **String Functions（13 个）**：格式化类 `format_string` / `printf` / `format_number`、
+  编解码类 `encode` / `decode`、数值转换类 `to_number` / `try_to_number`
+- **Mathematical Functions（11 个）**：三角函数 `sin` / `tan` / `tanh`、自然对数 `ln`、
+  `bround`、整除 `div`、`try_*` 算术
+- **XML Functions（9 个）**：`xpath` 系列，使用面较窄
 
 ## 2.3 分组明细
 
-### Array Functions（共 19 个）
+### Array Functions（共 19 个，已实现 18 个）
 
 | 状态 | 数量 | Function |
 |------|-----:|----------|
 | 已实现 | 18 | `array`、`array_contains`、`array_distinct`、`array_except`、`array_intersect`、`array_join`、`array_max`、`array_min`、`array_position`、`array_remove`、`array_repeat`、`array_union`、`arrays_overlap`、`arrays_zip`、`flatten`、`shuffle`、`slice`、`sort_array` |
 | 未实现 | 1 | `sequence` |
 
-### Map Functions（共 11 个）
+### Map Functions（共 11 个，已实现 8 个）
 
 | 状态 | 数量 | Function |
 |------|-----:|----------|
-| 已实现 | 5 | `element_at`、`map_contains_key`、`map_entries`、`map_keys`、`map_values` |
-| 部分实现 | 3 | `map`、`map_concat`、`str_to_map` |
+| 已实现 | 8 | `element_at`、`map`、`map_concat`、`map_contains_key`、`map_entries`、`map_keys`、`map_values`、`str_to_map` |
 | 未实现 | 3 | `map_from_arrays`、`map_from_entries`、`try_element_at` |
 
-部分实现的限制条件：
+以下 Function 已实现，但在下列情形下回退：
 
 - `str_to_map`：Only spark.sql.mapKeyDedupPolicy = EXCEPTION is supported for Velox backend
 
-### Struct Functions（共 2 个）
+### Struct Functions（共 2 个，已实现 2 个）
 
 | 状态 | 数量 | Function |
 |------|-----:|----------|
 | 已实现 | 2 | `named_struct`、`struct` |
 
-### Collection Functions（共 5 个）
+### Collection Functions（共 5 个，已实现 5 个）
 
 | 状态 | 数量 | Function |
 |------|-----:|----------|
 | 已实现 | 5 | `array_size`、`cardinality`、`concat`、`reverse`、`size` |
 
-### Lambda Functions（共 11 个）
+### Lambda Functions（共 11 个，已实现 11 个）
 
 | 状态 | 数量 | Function |
 |------|-----:|----------|
 | 已实现 | 11 | `aggregate`、`array_sort`、`exists`、`filter`、`forall`、`map_filter`、`map_zip_with`、`transform`、`transform_keys`、`transform_values`、`zip_with` |
 
-### String Functions（共 57 个）
+### String Functions（共 57 个，已实现 43 个）
 
 | 状态 | 数量 | Function |
 |------|-----:|----------|
-| 已实现 | 32 | `ascii`、`bit_length`、`btrim`、`char`、`char_length`、`character_length`、`chr`、`concat_ws`、`find_in_set`、`initcap`、`instr`、`lcase`、`left`、`length`、`levenshtein`、`locate`、`lower`、`ltrim`、`overlay`、`position`、`repeat`、`replace`、`right`、`rtrim`、`soundex`、`split`、`split_part`*、`substring_index`、`translate`、`trim`、`ucase`、`upper` |
-| 部分实现 | 12 | `base64`、`contains`、`endswith`、`lpad`、`regexp_extract`、`regexp_extract_all`、`regexp_replace`、`rpad`、`startswith`、`substr`、`substring`、`unbase64` |
-| 未实现 | 13 | `decode`、`elt`、`encode`、`format_number`、`format_string`、`octet_length`、`printf`、`sentences`、`space`、`to_binary`、`to_number`、`try_to_binary`、`try_to_number` |
+| 已实现 | 43 | `ascii`、`base64`、`bit_length`、`btrim`、`char`、`char_length`、`character_length`、`chr`、`concat_ws`、`contains`、`endswith`、`find_in_set`、`initcap`、`instr`、`lcase`、`left`、`length`、`levenshtein`、`locate`、`lower`、`lpad`、`ltrim`、`overlay`、`position`、`regexp_extract`、`regexp_extract_all`、`regexp_replace`、`repeat`、`replace`、`right`、`rpad`、`rtrim`、`soundex`、`split`、`startswith`、`substr`、`substring`、`substring_index`、`translate`、`trim`、`ucase`、`unbase64`、`upper` |
+| 未实现 | 14 | `decode`、`elt`、`encode`、`format_number`、`format_string`、`octet_length`、`printf`、`sentences`、`space`、`split_part`、`to_binary`、`to_number`、`try_to_binary`、`try_to_number` |
 
-部分实现的限制条件：
+以下 Function 已实现，但在下列情形下回退：
 
 - `base64`：base64 with chunkBase64String disabled is not supported
 - `contains`：BinaryType unsupported
@@ -322,113 +324,108 @@ Gluten 官方的函数支持清单由脚本从回归测试日志生成，判定�
 - `startswith`：BinaryType unsupported
 - `unbase64`：unbase64 with failOnError is not supported
 
-### Mathematical Functions（共 67 个）
+### Mathematical Functions（共 67 个，已实现 56 个）
 
 | 状态 | 数量 | Function |
 |------|-----:|----------|
-| 已实现 | 52 | `%`、`*`、`+`、`-`、`/`、`abs`、`acos`、`acosh`、`asin`、`asinh`、`atan`、`atan2`、`atanh`、`bin`、`cbrt`、`conv`、`cos`、`cosh`、`cot`、`csc`、`degrees`、`e`、`exp`、`expm1`、`factorial`、`greatest`、`hex`、`hypot`、`least`、`log`、`log10`、`log1p`、`log2`、`mod`、`negative`、`pi`、`pmod`、`positive`、`pow`、`power`、`rand`、`random`、`rint`、`round`、`sec`、`shiftleft`、`sign`、`signum`、`sinh`、`sqrt`、`unhex`、`width_bucket` |
-| 部分实现 | 4 | `ceil`、`ceiling`、`floor`、`try_add` |
+| 已实现 | 56 | `%`、`*`、`+`、`-`、`/`、`abs`、`acos`、`acosh`、`asin`、`asinh`、`atan`、`atan2`、`atanh`、`bin`、`cbrt`、`ceil`、`ceiling`、`conv`、`cos`、`cosh`、`cot`、`csc`、`degrees`、`e`、`exp`、`expm1`、`factorial`、`floor`、`greatest`、`hex`、`hypot`、`least`、`log`、`log10`、`log1p`、`log2`、`mod`、`negative`、`pi`、`pmod`、`positive`、`pow`、`power`、`rand`、`random`、`rint`、`round`、`sec`、`shiftleft`、`sign`、`signum`、`sinh`、`sqrt`、`try_add`、`unhex`、`width_bucket` |
 | 未实现 | 11 | `bround`、`div`、`ln`、`radians`、`randn`、`sin`、`tan`、`tanh`、`try_divide`、`try_multiply`、`try_subtract` |
 
-### Date and Timestamp Functions（共 50 个）
+### Date and Timestamp Functions（共 50 个，已实现 37 个）
 
 | 状态 | 数量 | Function |
 |------|-----:|----------|
-| 已实现 | 36 | `add_months`、`date_add`、`date_format`、`date_from_unix_date`、`date_sub`、`date_trunc`、`datediff`、`day`、`dayofmonth`、`dayofweek`、`dayofyear`、`extract`、`from_unixtime`、`from_utc_timestamp`、`hour`、`last_day`、`make_date`、`make_timestamp`、`make_ym_interval`、`minute`、`month`、`next_day`、`quarter`、`second`、`timestamp_micros`、`timestamp_millis`、`to_utc_timestamp`、`trunc`、`unix_date`、`unix_micros`、`unix_millis`、`unix_seconds`、`unix_timestamp`、`weekday`、`weekofyear`、`year` |
-| 部分实现 | 1 | `to_unix_timestamp` |
+| 已实现 | 37 | `add_months`、`date_add`、`date_format`、`date_from_unix_date`、`date_sub`、`date_trunc`、`datediff`、`day`、`dayofmonth`、`dayofweek`、`dayofyear`、`extract`、`from_unixtime`、`from_utc_timestamp`、`hour`、`last_day`、`make_date`、`make_timestamp`、`make_ym_interval`、`minute`、`month`、`next_day`、`quarter`、`second`、`timestamp_micros`、`timestamp_millis`、`to_unix_timestamp`、`to_utc_timestamp`、`trunc`、`unix_date`、`unix_micros`、`unix_millis`、`unix_seconds`、`unix_timestamp`、`weekday`、`weekofyear`、`year` |
 | 未实现 | 13 | `current_date`、`current_timestamp`、`current_timezone`、`date_part`、`make_dt_interval`、`make_interval`、`months_between`、`now`、`session_window`、`timestamp_seconds`、`to_date`、`to_timestamp`、`window` |
 
-### Predicate Functions（共 24 个）
+### Predicate Functions（共 24 个，已实现 24 个）
 
 | 状态 | 数量 | Function |
 |------|-----:|----------|
-| 已实现 | 20 | `!`、`!=`、`<`、`<=`、`<=>`、`<>`、`=`、`==`、`>`、`>=`、`and`、`between`、`case`、`ilike`、`isnan`、`isnotnull`、`isnull`、`like`、`not`、`or` |
-| 部分实现 | 4 | `in`、`regexp`、`regexp_like`、`rlike` |
+| 已实现 | 24 | `!`、`!=`、`<`、`<=`、`<=>`、`<>`、`=`、`==`、`>`、`>=`、`and`、`between`、`case`、`ilike`、`in`、`isnan`、`isnotnull`、`isnull`、`like`、`not`、`or`、`regexp`、`regexp_like`、`rlike` |
 
-部分实现的限制条件：
+以下 Function 已实现，但在下列情形下回退：
 
 - `regexp`：Lookaround unsupported
 - `regexp_like`：Lookaround unsupported
 - `rlike`：Lookaround unsupported
 
-### Conditional Functions（共 8 个）
+### Conditional Functions（共 8 个，已实现 8 个）
 
 | 状态 | 数量 | Function |
 |------|-----:|----------|
 | 已实现 | 8 | `coalesce`、`if`、`ifnull`、`nanvl`、`nullif`、`nvl`、`nvl2`、`when` |
 
-### Conversion Functions（共 13 个）
+### Conversion Functions（共 13 个，已实现 13 个）
 
 | 状态 | 数量 | Function |
 |------|-----:|----------|
 | 已实现 | 13 | `bigint`、`binary`、`boolean`、`cast`、`date`、`decimal`、`double`、`float`、`int`、`smallint`、`string`、`timestamp`、`tinyint` |
 
-### Hash Functions（共 7 个）
+### Hash Functions（共 7 个，已实现 7 个）
 
 | 状态 | 数量 | Function |
 |------|-----:|----------|
 | 已实现 | 7 | `crc32`、`hash`、`md5`、`sha`、`sha1`、`sha2`、`xxhash64` |
 
-### Bitwise Functions（共 9 个）
+### Bitwise Functions（共 9 个，已实现 8 个）
 
 | 状态 | 数量 | Function |
 |------|-----:|----------|
 | 已实现 | 8 | `&`、`&#124;`、`^`、`bit_count`、`bit_get`、`getbit`、`shiftright`、`~` |
 | 未实现 | 1 | `shiftrightunsigned` |
 
-### JSON Functions（共 7 个）
+### JSON Functions（共 7 个，已实现 6 个）
 
 | 状态 | 数量 | Function |
 |------|-----:|----------|
-| 已实现 | 4 | `get_json_object`、`json_array_length`、`json_object_keys`、`json_tuple` |
-| 部分实现 | 2 | `from_json`、`to_json` |
+| 已实现 | 6 | `from_json`、`get_json_object`、`json_array_length`、`json_object_keys`、`json_tuple`、`to_json` |
 | 未实现 | 1 | `schema_of_json` |
 
-部分实现的限制条件：
+以下 Function 已实现，但在下列情形下回退：
 
 - `from_json`：from_json with 'spark.sql.caseSensitive = true' is not supported in Velox；from_json with 'spark.sql.json.enablePartialResults = false' is not supported in Velox；from_json with column corrupt record is not supported in Velox；from_json with duplicate keys is not supported in Velox；from_json with options is not supported in Velox
 - `to_json`：to_json with options is not supported in Velox
 
-### Csv Functions（共 3 个）
+### Csv Functions（共 3 个，已实现 0 个）
 
 | 状态 | 数量 | Function |
 |------|-----:|----------|
 | 未实现 | 3 | `from_csv`、`schema_of_csv`、`to_csv` |
 
-### URL Functions（共 1 个）
+### URL Functions（共 1 个，已实现 0 个）
 
 | 状态 | 数量 | Function |
 |------|-----:|----------|
 | 未实现 | 1 | `parse_url` |
 
-### XML Functions（共 9 个）
+### XML Functions（共 9 个，已实现 0 个）
 
 | 状态 | 数量 | Function |
 |------|-----:|----------|
 | 未实现 | 9 | `xpath`、`xpath_boolean`、`xpath_double`、`xpath_float`、`xpath_int`、`xpath_long`、`xpath_number`、`xpath_short`、`xpath_string` |
 
-### Misc Functions（共 17 个）
+### Misc Functions（共 17 个，已实现 5 个）
 
 | 状态 | 数量 | Function |
 |------|-----:|----------|
 | 已实现 | 5 | `&#124;&#124;`、`assert_true`、`spark_partition_id`、`uuid`、`version` |
 | 未实现 | 12 | `aes_decrypt`、`aes_encrypt`、`current_catalog`、`current_database`、`current_user`、`input_file_block_length`、`input_file_block_start`、`input_file_name`、`java_method`、`monotonically_increasing_id`、`reflect`、`typeof` |
 
-### Aggregate Functions（共 50 个）
+### Aggregate Functions（共 50 个，已实现 44 个）
 
 | 状态 | 数量 | Function |
 |------|-----:|----------|
-| 已实现 | 47 | `any`、`approx_count_distinct`、`approx_percentile`*、`array_agg`、`avg`、`bit_and`、`bit_or`、`bit_xor`、`bool_and`、`bool_or`、`collect_list`、`collect_set`、`corr`、`count`、`count_if`、`covar_pop`、`covar_samp`、`every`、`first`、`first_value`、`grouping`、`grouping_id`、`kurtosis`、`last`、`last_value`、`max`、`max_by`、`mean`、`min`、`min_by`、`percentile`*、`percentile_approx`*、`regr_avgx`、`regr_avgy`、`regr_count`、`regr_r2`、`skewness`、`some`、`std`、`stddev`、`stddev_pop`、`stddev_samp`、`sum`、`try_avg`、`var_pop`、`var_samp`、`variance` |
-| 部分实现 | 1 | `try_sum` |
-| 未实现 | 2 | `count_min_sketch`、`histogram_numeric` |
+| 已实现 | 44 | `any`、`approx_count_distinct`、`array_agg`、`avg`、`bit_and`、`bit_or`、`bit_xor`、`bool_and`、`bool_or`、`collect_list`、`collect_set`、`corr`、`count`、`count_if`、`covar_pop`、`covar_samp`、`every`、`first`、`first_value`、`grouping`、`grouping_id`、`kurtosis`、`last`、`last_value`、`max`、`max_by`、`mean`、`min`、`min_by`、`regr_avgx`、`regr_avgy`、`regr_count`、`regr_r2`、`skewness`、`some`、`std`、`stddev`、`stddev_pop`、`stddev_samp`、`sum`、`try_avg`、`var_pop`、`var_samp`、`variance` |
+| 未实现 | 6 | `approx_percentile`、`count_min_sketch`、`histogram_numeric`、`percentile`、`percentile_approx`、`try_sum` |
 
-### Window Functions（共 9 个）
+### Window Functions（共 9 个，已实现 9 个）
 
 | 状态 | 数量 | Function |
 |------|-----:|----------|
 | 已实现 | 9 | `cume_dist`、`dense_rank`、`lag`、`lead`、`nth_value`、`ntile`、`percent_rank`、`rank`、`row_number` |
 
-### Generator Functions（共 7 个）
+### Generator Functions（共 7 个，已实现 7 个）
 
 | 状态 | 数量 | Function |
 |------|-----:|----------|
@@ -449,15 +446,31 @@ Gluten 官方的函数支持清单由脚本从回归测试日志生成，判定�
 
 **Function 部分**——以 Spark 3.3.2 `FunctionRegistry` 的实际注册项为分母，逐函数状态取自
 Gluten 官方生成的四份函数支持清单，再剔除 Spark 3.5 才引入、3.3.2 中不存在的 49 个函数。
-2.2 节的偏差通过将每个映射名（经 `SubstraitParser.cc` 别名表转换后）与 pin 住的 Velox 分支
-`velox/functions/sparksql/registration/` 下实际注册的函数名交叉比对得出。
 
-**局限性**——本文未执行构建与测试。Function 部分的状态源自官方清单最后一次生成时的测试结果
+官方清单的判定逻辑是"回归测试中未观测到回退即视为支持"，因此未被测试覆盖的 Function 会被
+乐观标记。我们将每个 Function 的映射名（经 `SubstraitParser.cc` 别名表转换后）与 pin 住的
+Velox 分支 `velox/functions/sparksql/registration/` 下实际注册的函数名交叉比对，据此修正了
+5 处标记：
+
+| Function | 官方清单 | 本文 | 修正依据 |
+|----------|---------|------|---------|
+| `split_part` | 支持 | 未实现 | 位于 Velox 原生标量黑名单，且未以 Spark 前缀注册 |
+| `approx_percentile` | 支持 | 未实现 | 映射名既在标量黑名单，又不在 32 名原生聚合白名单内 |
+| `percentile_approx` | 支持 | 未实现 | 同上（与 `approx_percentile` 共用 `ApproximatePercentile` 表达式类） |
+| `percentile` | 支持 | 未实现 | 映射名 `percentile` 不在原生聚合白名单内 |
+| `try_sum` | 部分支持 | 未实现 | `checkAggFuncModeSupport` 对 `try_sum` 在所有 `AggregateMode` 下均返回 false，即无条件回退 |
+
+**关于 13 个 RuntimeReplaceableAggregate**——`any`、`bool_and`、`bool_or`、`count_if`、`every`、
+`grouping`、`grouping_id`、`regr_avgx`、`regr_avgy`、`regr_count`、`some`、`try_avg` 等在 Spark
+中实现为 `RuntimeReplaceableAggregate`，分析阶段即被改写为其他聚合再执行。本文将其计入已实现，
+因为使用这些 Function 的查询确实获得向量化加速；但需注意加速来自改写后的聚合，而非该具名
+Function 本身。
+
+**局限性**——本文未执行构建与测试。Function 状态源自官方清单最后一次生成时的测试结果
 （Scalar 2025-08-14、Generator 2025-07-21、Aggregate 与 Window 2025-04-04），均早于 1.5.0
-发布日期（2025-10-13）。建议将本文作为能力范围的参考基线，具体作业的加速覆盖面以 POC 实测
-为准。
+发布日期（2025-10-13），期间仍有影响 Function 的改动落地。建议将本文作为能力范围的参考基线，
+具体作业的加速覆盖面以 POC 实测为准。
 
 **相关文档**——如需了解卸载判定机制、数据类型支持、回退诊断方法与 Spark 3.3 特有事项，参见
 《Gluten 技术详版 - Spark 3.3.2》；如需面向业务决策的能力概述，参见
 《Gluten 能力说明 - 客户版 - Spark 3.3.2》。
-
