@@ -26,26 +26,18 @@ import org.apache.gluten.extension.injector.Injector
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
 
-/**
- * Base of the Iceberg scan offload rule. The switch is checked here rather than at rule injection
- * time so that it stays modifiable at runtime.
- */
-trait OffloadIcebergScanBase extends OffloadSingleNode {
-  final override def offload(plan: SparkPlan): SparkPlan = {
+case class OffloadIcebergScan() extends OffloadSingleNode {
+  override def offload(plan: SparkPlan): SparkPlan = {
+    // The switch is checked here rather than at rule injection time so that it stays
+    // modifiable at runtime.
     if (!GlutenIcebergConfig.get.enableNativeRead) {
       return plan
     }
-    offloadScan(plan)
-  }
-
-  protected def offloadScan(plan: SparkPlan): SparkPlan
-}
-
-case class OffloadIcebergScan() extends OffloadIcebergScanBase {
-  override protected def offloadScan(plan: SparkPlan): SparkPlan = plan match {
-    case scan: BatchScanExec if IcebergScanTransformer.supportsBatchScan(scan.scan) =>
-      IcebergScanTransformer(scan)
-    case other => other
+    plan match {
+      case scan: BatchScanExec if IcebergScanTransformer.supportsBatchScan(scan.scan) =>
+        IcebergScanTransformer(scan)
+      case other => other
+    }
   }
 }
 
