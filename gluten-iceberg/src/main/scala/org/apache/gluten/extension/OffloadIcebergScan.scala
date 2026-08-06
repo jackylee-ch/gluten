@@ -28,8 +28,6 @@ import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
 
 case class OffloadIcebergScan() extends OffloadSingleNode {
   override def offload(plan: SparkPlan): SparkPlan = {
-    // The switch is checked here rather than at rule injection time so that it stays
-    // modifiable at runtime.
     if (!GlutenIcebergConfig.get.enableNativeRead) {
       return plan
     }

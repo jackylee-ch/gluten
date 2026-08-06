@@ -28,9 +28,6 @@ import org.apache.spark.sql.execution.datasources.v2._
 
 import org.apache.iceberg.spark.source.IcebergWriteUtil.supportsWrite
 
-// The write switch is checked inside each rule below rather than at rule injection time so that
-// it stays modifiable at runtime.
-
 case class OffloadIcebergAppend() extends OffloadSingleNode {
   override def offload(plan: SparkPlan): SparkPlan = {
     if (!GlutenIcebergConfig.get.enableNativeWrite) {

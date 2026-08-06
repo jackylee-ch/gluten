@@ -26,12 +26,6 @@ class GlutenIcebergConfig(conf: SQLConf) extends GlutenCoreConfig(conf) {
   def enableNativeWrite: Boolean = getConf(ENABLE_NATIVE_WRITE)
 }
 
-/**
- * Configurations of the Iceberg component. They are backend-agnostic on purpose: the read path
- * ([[org.apache.gluten.extension.OffloadIcebergScan]]) is shared by all backends, and a backend
- * newly supporting Iceberg write is expected to honor the same write switch rather than introduce
- * its own key.
- */
 object GlutenIcebergConfig extends ConfigRegistry {
 
   def get: GlutenIcebergConfig = {

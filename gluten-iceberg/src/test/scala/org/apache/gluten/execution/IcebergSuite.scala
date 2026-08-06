@@ -761,8 +761,6 @@ abstract class IcebergSuite extends WholeStageTransformerSuite {
               !getExecutedPlan(icebergDf).exists(_.isInstanceOf[IcebergScanTransformer]),
               "Iceberg scan should fall back")
 
-            // The switch is scoped to Iceberg: scans of other formats keep being offloaded, which
-            // is the whole point of not reusing spark.gluten.sql.columnar.batchscan for this.
             val parquetDf = spark.read.parquet(path.getCanonicalPath)
             checkGlutenPlan[FileSourceScanExecTransformer](parquetDf)
             assert(parquetDf.count() == 5)
