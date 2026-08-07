@@ -570,7 +570,6 @@ object VeloxConfig extends ConfigRegistry {
   val COLUMNAR_VELOX_FILE_HANDLE_CACHE_ENABLED =
     buildStaticConf("spark.gluten.sql.columnar.backend.velox.fileHandleCacheEnabled")
       .passToNative()
-      .passDefault()
       .doc(
         "Enables caching of open file handles to avoid repeated open/close overhead. " +
           "Benefits both local filesystems (fewer open/close syscalls and file descriptor " +
@@ -583,7 +582,6 @@ object VeloxConfig extends ConfigRegistry {
   val COLUMNAR_VELOX_NUM_CACHE_FILE_HANDLES =
     buildStaticConf("spark.gluten.sql.columnar.backend.velox.numCacheFileHandles")
       .passToNative()
-      .passDefault()
       .doc(
         "Maximum number of entries in the file handle cache. Each entry holds an open " +
           "file descriptor (local FS) or connection state (remote FS). Note that on " +
@@ -598,7 +596,6 @@ object VeloxConfig extends ConfigRegistry {
   val COLUMNAR_VELOX_FILE_HANDLE_EXPIRATION_DURATION_MS =
     buildStaticConf("spark.gluten.sql.columnar.backend.velox.fileHandleExpirationDurationMs")
       .passToNative()
-      .passDefault()
       .doc(
         "Expiration time for cached file handles. Handles not accessed within this duration " +
           "are evicted from the cache. This prevents stale handles from accumulating (e.g., " +
@@ -663,13 +660,11 @@ object VeloxConfig extends ConfigRegistry {
 
   // The three confs below are read by native `createHiveConnectorConfig`, which runs both at
   // backend initialization (for the reused HiveConnector) and per write on each native runtime
-  // (`VeloxParquetDataSourceS3::initSink`, `IcebergWriter`), so they are modifiable confs whose
-  // default is always passed.
+  // (`VeloxParquetDataSourceS3::initSink`, `IcebergWriter`), hence they are modifiable confs.
   val AWS_SDK_LOG_LEVEL =
     buildConf("spark.gluten.velox.awsSdkLogLevel")
       .internal()
       .passToNative()
-      .passDefault()
       .doc("Log granularity of AWS C++ SDK in velox.")
       .stringConf
       .createWithDefault("FATAL")
@@ -678,7 +673,6 @@ object VeloxConfig extends ConfigRegistry {
     buildConf("spark.gluten.velox.s3UseProxyFromEnv")
       .internal()
       .passToNative()
-      .passDefault()
       .doc("Whether to use proxy from environment variables for S3 C++ client.")
       .booleanConf
       .createWithDefault(false)
@@ -687,7 +681,6 @@ object VeloxConfig extends ConfigRegistry {
     buildConf("spark.gluten.velox.s3PayloadSigningPolicy")
       .internal()
       .passToNative()
-      .passDefault()
       .doc("The S3 payload signing policy: Always, RequestDependent and Never.")
       .stringConf
       .createWithDefault("Never")

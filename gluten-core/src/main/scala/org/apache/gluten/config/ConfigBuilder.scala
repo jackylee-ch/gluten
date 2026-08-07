@@ -17,6 +17,7 @@
 package org.apache.gluten.config
 
 import org.apache.spark.network.util.{ByteUnit, JavaUtils}
+import org.apache.spark.sql.internal.GlutenConfigUtil
 
 import java.util.concurrent.TimeUnit
 
@@ -37,7 +38,6 @@ private[gluten] case class ConfigBuilder(key: String) {
   private[config] var _onCreate: Option[ConfigEntry[_] => Unit] = None
   private[config] var _isStatic = false
   private[config] var _passToNative = false
-  private[config] var _passDefault = false
   private[config] var _isForeign = false
   private[config] var _nativeTransform: Option[String => String] = None
 
@@ -102,8 +102,10 @@ private[gluten] case class ConfigBuilder(key: String) {
   }
 
   /**
-   * Marks this config to be passed to native side when it is set by user. The config is registered
-   * to [[NativeConfRegistry]] on entry creation.
+   * Marks this config to be passed to native side. A value set by user is passed as is; when the
+   * user did not set it, the conf's declared default is passed instead, resolved at delivery time.
+   * Declaring `createOptional` therefore means "pass only when set", which leaves native's own
+   * fallback in charge. The config is registered to [[NativeConfRegistry]] on entry creation.
    *
    * The native scope follows the conf's mutability, so there is no scope argument:
    *   - `buildConf` / `registerConf`: modifiable at any time and usable at any time. Delivered both
@@ -118,24 +120,10 @@ private[gluten] case class ConfigBuilder(key: String) {
   }
 
   /**
-   * Marks that this config's default value should also be passed to native side even when the conf
-   * is not set by user. The default is passed in parsed form, e.g. a "64MB" bytes conf is passed as
-   * "67108864". Use this when native side relies on the key being always present. Must be used
-   * together with [[passToNative]], and the entry must define a default value.
-   *
-   * The default is re-resolved on each delivery rather than snapshotted at declaration, so an entry
-   * whose default is dynamic - see `TypedConfigBuilder.createWithDefaultFunction` - keeps passing
-   * its current value.
-   */
-  def passDefault(): ConfigBuilder = {
-    _passDefault = true
-    this
-  }
-
-  /**
-   * Normalizes a user-set value before it is passed to native side, e.g. converting a size string
-   * like "64k" to a number of bytes, or upper-casing. Not applied to the value delivered by
-   * [[passDefault]], which is already in its final form.
+   * Normalizes a value before it is passed to native side, e.g. converting a size string like "64k"
+   * to a number of bytes, or upper-casing. Applied to a resolved default the same way as to a
+   * user-set value, since a default may be a raw string too - Spark's own default for
+   * `spark.shuffle.file.buffer` is "32k".
    */
   def nativeTransform(fn: String => String): ConfigBuilder = {
     _nativeTransform = Some(fn)
@@ -143,9 +131,6 @@ private[gluten] case class ConfigBuilder(key: String) {
   }
 
   private[config] def registerToNative(entry: ConfigEntry[_]): Unit = {
-    require(
-      !_passDefault || _passToNative,
-      s"Config $key: passDefault() must be used together with passToNative()")
     require(
       !_isForeign || _passToNative,
       s"Config $key: a config declared by registerConf() / registerStaticConf() must be marked " +
@@ -159,22 +144,27 @@ private[gluten] case class ConfigBuilder(key: String) {
     // native backend is initialized and not modifiable afterwards, so delivering it once there is
     // lossless.
     val scope = if (_isStatic) NativeScope.BACKEND else NativeScope.ALL
-    if (_passDefault) {
-      require(
-        entry.defaultValue.isDefined,
-        s"Config $key is marked with passDefault() but has no default value")
-      // `entry.defaultValue` is resolved on each delivery rather than snapshotted here, so an entry
-      // whose default is dynamic - e.g. `spark.sql.session.timeZone` defaulting to the current JVM
-      // time zone - keeps passing its current value. Passing the parsed default rather than the raw
-      // default string also means e.g. a "64MB" bytes conf reaches native as "67108864".
-      NativeConfRegistry.register(
-        key,
-        scope,
-        entry.defaultValue.map(_.toString),
-        _nativeTransform)
-    } else {
-      NativeConfRegistry.register(key, scope, None, _nativeTransform)
-    }
+    NativeConfRegistry.register(key, scope, declaredDefault(entry), _nativeTransform)
+  }
+
+  /**
+   * The default delivered to native for a key the user did not set. Read per delivery rather than
+   * snapshotted, so an entry whose default is dynamic keeps delivering its current value.
+   */
+  private def declaredDefault(entry: ConfigEntry[_]): Option[String] = entry match {
+    // A fallback entry reports the *target* conf's default as its own, and the target is delivered
+    // under its own key. Delivering it here would also contradict the user: with only the target
+    // conf set, this key would carry the target's default rather than the value the user chose.
+    case _: ConfigEntryFallback[_] | _: ConfigEntrySparkFallback[_] => None
+    // Reading the parsed default rather than the raw default string means e.g. a "64MB" bytes conf
+    // reaches native as "67108864".
+    case e if e.defaultValue.isDefined => e.defaultValue.map(_.toString)
+    // A Spark- or Hadoop-owned key that Gluten declares no default for takes the one its owner
+    // declares, so the two cannot drift across Spark versions. Yields None for a Hadoop key that no
+    // Spark entry declares, leaving native's own fallback in charge.
+    case _ if _isForeign => GlutenConfigUtil.resolveSparkDeclaredDefault(key)
+    // A Gluten conf declared `createOptional`: delivered only when set.
+    case _ => None
   }
 
   def intConf: TypedConfigBuilder[Int] = {
@@ -326,12 +316,6 @@ private[gluten] class TypedConfigBuilder[T](
     this
   }
 
-  /** See [[ConfigBuilder.passDefault]]. Callable after the value type is chosen. */
-  def passDefault(): TypedConfigBuilder[T] = {
-    parent.passDefault()
-    this
-  }
-
   /** See [[ConfigBuilder.nativeTransform]]. Callable after the value type is chosen. */
   def nativeTransform(fn: String => String): TypedConfigBuilder[T] = {
     parent.nativeTransform(fn)
@@ -400,7 +384,7 @@ private[gluten] class TypedConfigBuilder[T](
    * Creates an entry whose default value is computed on each read rather than fixed here, mirroring
    * Spark's `createWithDefaultFunction`. Use it when the default depends on JVM or session state,
    * e.g. a time zone conf defaulting to the current JVM default time zone. Combined with
-   * `passDefault`, native receives the value resolved at delivery time.
+   * `passToNative`, native receives the value resolved at delivery time.
    */
   def createWithDefaultFunction(defaultFunc: () => T): ConfigEntry[T] = {
     val entry = new ConfigEntryWithDefaultFunction[T](

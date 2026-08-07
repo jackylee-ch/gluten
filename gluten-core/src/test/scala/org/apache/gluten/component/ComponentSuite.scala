@@ -232,7 +232,6 @@ object ComponentSuite {
     registerStaticConf("spark.gluten.test.component.plain.conf")
       .stringConf
       .passToNative()
-      .passDefault()
       .createWithDefault("componentDefault")
   }
 

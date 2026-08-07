@@ -81,24 +81,45 @@ val COLUMNAR_MAX_BATCH_SIZE =
     .passToNative()
     .intConf
     .createWithDefault(4096)
-
-val COLUMNAR_VELOX_FILE_HANDLE_CACHE_ENABLED =
-  buildStaticConf("spark.gluten.sql.columnar.backend.velox.fileHandleCacheEnabled")
-    .passToNative()
-    .passDefault()       // native relies on the key being always present
-    .booleanConf
-    .createWithDefault(true)
 ```
 
-- `passToNative()`: registers the conf to `NativeConfRegistry` on entry creation.
-- `passDefault()`: additionally delivers the conf's own default value (in parsed form, e.g. a
-  "64MB" bytes conf is delivered as "67108864") when the user did not set the conf. Requires
-  `passToNative()` and a defined default value; both are checked eagerly at entry creation. The
-  default is re-resolved on each delivery, so an entry declared with `createWithDefaultFunction`
-  keeps passing its current value.
-- `nativeTransform(fn)`: normalizes a user-set value before delivery, e.g. a size string to a
-  number of bytes, or upper-casing. Not applied to the value delivered by `passDefault()`, which is
-  already in its final form.
+- `passToNative()`: registers the conf to `NativeConfRegistry` on entry creation. A value set by the
+  user is delivered as is; when the user did not set it, the conf's declared default is delivered
+  instead, in parsed form (a "64MB" bytes conf reaches native as "67108864").
+- `nativeTransform(fn)`: normalizes a value before delivery, e.g. a size string to a number of bytes,
+  or upper-casing. Applied to a resolved default the same way as to a user-set value, since a default
+  may be a raw string too — Spark's own default for `spark.shuffle.file.buffer` is "32k".
+
+The default is read per delivery rather than snapshotted at declaration, so an entry declared with
+`createWithDefaultFunction` keeps delivering its current value.
+
+#### When a conf should have no default
+
+The conf's own declaration decides what an unset key delivers. `createOptional` means "deliver only
+when set", which hands the decision to native's own fallback — and that is the right choice whenever
+native has a fallback that is already correct, since declaring a redundant default only makes the JVM
+a second owner of the same value, to be kept in step by hand.
+
+More importantly, some native read sites branch on whether the key is *present*, not on its value:
+
+```cpp
+if (!backendConf_->valueExists(kNumTaskSlotsPerExecutor)) { /* warn, fall back to 1 */ }
+if (conf->valueExists(sparkKey)) { /* ... */ }              // ConfigExtractor.cc, S3 keys
+GLUTEN_CHECK(saveDir.has_value(), kGlutenSaveDir + " is not set");
+```
+
+For such a key, a default would defeat the check — so it must be declared `createOptional`. This is
+why `spark.gluten.numTaskSlotsPerExecutor` and `spark.gluten.saveDir` have no default: their value
+cannot be derived at declaration time, and a placeholder (`-1`, `""`) would pass native's presence
+check and then fail its validation, or be used as a real value.
+
+Conversely, declare a default when leaving the key out would change behavior:
+
+- **native has no fallback and fails without the key** —
+  `spark.gluten.sql.columnarToRowMemoryThreshold` (`GLUTEN_CHECK` in `JniWrapper.cc`) and
+  `spark.gluten.memory.backtrace.allocation` (`std::unordered_map::at`) both throw when it is absent;
+- **native's fallback disagrees with what Gluten wants** — `fs.s3a.path.style.access` falls back to
+  `false` in `ConfigExtractor` where Gluten wants `true`.
 
 The markers are available both before and after the value type is chosen, so
 `.passToNative().intConf.createWithDefault(4096)` and `.intConf.passToNative().createWithDefault(4096)`
@@ -111,43 +132,29 @@ already registered them, and registering again conflicts with it. `registerConf`
 `registerStaticConf` declare only the native delivery:
 
 ```scala
+registerConf(SQLConf.ANSI_ENABLED.key).stringConf.passToNative().createOptional
+
 registerConf(SPARK_S3_PATH_STYLE_ACCESS)
   .doc("Read by the native S3 file system.")
   .booleanConf
   .passToNative()
-  .passDefault()
   .createWithDefault(true)
-
-registerStaticConf("spark.sql.orc.compression.codec")
-  .doc("Consumed by ClickHouse backend initialization.")
-  .stringConf
-  .passToNative()
-  .passDefault()
-  .createWithDefault("snappy")
 ```
 
-The default declared here is what native receives when the user did not set the key. It does not
-have to repeat, and is not checked against, the owner's own default — the S3 confs above are an
-example where Gluten deliberately differs from Hadoop's `core-default.xml`. Where the intent *is*
-to mirror Spark's default, take it from Spark's own entry so it cannot drift across versions, and
-mirror it as a *function* — a Spark default may itself be dynamic, and reading it once at
-declaration time would pin whatever it resolved to while the conf object was initializing:
+`createOptional` here does **not** mean "deliver only when set". For a Spark-owned key it means "the
+default is Spark's", and Gluten resolves it from Spark's own entry at delivery time — both `SQLConf`
+entries and Spark core ones. Nothing is restated on the Gluten side, so the two cannot drift across
+Spark versions; `spark.sql.ansi.enabled` alone changed default in Spark 4.0, and Spark's default for
+`spark.sql.session.timeZone` is the current JVM default time zone, which a session (or a test) may
+change after startup. Both are handled by resolving per delivery rather than once at declaration.
 
-```scala
-registerConf(SQLConf.CASE_SENSITIVE.key)
-  .stringConf
-  .passToNative()
-  .passDefault()
-  .createWithDefaultFunction(() => SQLConf.CASE_SENSITIVE.defaultValueString)
+Declaring a default (`createWithDefault`) states that Gluten deliberately departs from what the owner
+and native would otherwise apply — `path.style.access` above differs from both Hadoop's
+`core-default.xml` and `ConfigExtractor`'s `false`. Only do this when there is such a departure.
 
-// spark.sql.session.timeZone is the case that makes this mandatory: its default is the current
-// JVM default time zone, which a session (or a test) may change after this declaration has run.
-registerConf(SQLConf.SESSION_LOCAL_TIMEZONE.key)
-  .stringConf
-  .passToNative()
-  .passDefault()
-  .createWithDefaultFunction(() => SQLConf.SESSION_LOCAL_TIMEZONE.defaultValueString)
-```
+A Hadoop key that no Spark entry declares (`spark.hadoop.fs.s3a.access.key`, ...) resolves to no
+default, and is therefore delivered only when set. That is what the S3 credential keys need, since
+native branches on whether they are present at all.
 
 `passToNative()` is mandatory for these: a foreign conf is not read on the JVM side, so declaring
 one without delivering it to native would have no effect at all.
@@ -208,7 +215,6 @@ object AcmeConfig extends ConfigRegistry {
   val ACME_CACHE_ENABLED =
     buildStaticConf("spark.gluten.acme.cacheEnabled")
       .passToNative()
-      .passDefault()
       .booleanConf
       .createWithDefault(true)
 
@@ -280,12 +286,13 @@ and friends, and `IcebergWriter`. Any conf it reads must therefore be declared m
 reaches the runtime channel too, which is why the three `spark.gluten.velox.*` S3 confs above are
 not static.
 
-Native has its own fallback for the `spark.hadoop.fs.s3a.*` connection confs, and it does not
-always agree with what Gluten declares — `path.style.access` falls back to `false` in
-`ConfigExtractor` while Gluten declares `true`. Declaring the default makes Gluten's value the one
-native sees on both channels, which is the intent; the previous behavior, where the write path
-silently got a different default from the read path, was a latent inconsistency rather than a
-contract.
+No Spark entry declares the `spark.hadoop.fs.s3a.*` connection confs, so an unset one resolves to no
+default and native's own fallback applies. Three of them declare a Gluten-side default because
+Gluten's choice departs from that fallback — `path.style.access` falls back to `false` in
+`ConfigExtractor` while Gluten wants `true`, `connection.maximum` to `25` while Gluten wants `15`, and
+`retry.limit` has no native fallback at all — which makes Gluten's value the one native sees on both
+channels. The previous behavior, where the write path silently got a different default from the read
+path, was a latent inconsistency rather than a contract.
 
 ### Confs kept modifiable for JVM-side reasons
 
@@ -294,10 +301,17 @@ per stage when a new resource profile is applied, and JVM-side readers observe t
 values:
 
 - `spark.gluten.numTaskSlotsPerExecutor` — native reads it at backend init only (Velox io/spill
-  thread sizing), and warns and falls back to 1 when the key is missing, hence `passDefault()`.
+  thread sizing), and warns and falls back to 1 when the key is missing. Declared `createOptional`,
+  since the value cannot be derived without a SparkConf at hand and a placeholder would fail native's
+  `GLUTEN_CHECK(numTaskSlotsPerExecutor >= 0)`.
 - `spark.gluten.memory.offHeap.size.in.bytes` — native reads it at backend init only (CH spill
   thresholds).
 - `spark.gluten.memory.task.offHeap.size.in.bytes` — read on both sides, see the table above.
+
+The latter two still declare `0` as their default, which is a placeholder in the same sense: the real
+value is computed by `GlutenPlugin.setPredefinedConfigs`. Native's fallback for an absent key is
+`kMaxMemory`, so `0` is not what native should see; making them `createOptional` requires deciding
+what their JVM-side accessors return instead, which is left to a follow-up.
 
 These stay modifiable because they are genuinely session-mutable, not because a static declaration
 would break the rewrite: `SQLConf.setConfString` does not reject static keys (that guard lives in
@@ -344,15 +358,24 @@ The initialization points, in the order they run:
   config path moved to velox's `S3Config`.
 - The hand-written fallback from `spark.gluten.sql.columnar.shuffle.codec` to
   `spark.io.compression.codec` in `GlutenShuffleUtils`, now expressed by `fallbackConf`.
+- The restating of Spark defaults on the Gluten side. The old "configs having default values" lists
+  spelled out each Spark default next to its key; a Spark-owned conf now declares `createOptional` and
+  its default is resolved from Spark's own entry at delivery time, so the two cannot drift.
+  `spark.gluten.numTaskSlotsPerExecutor` and `spark.gluten.saveDir` become `createOptional` in the
+  process: their `-1` / `""` defaults were placeholders that native either rejects
+  (`GLUTEN_CHECK(numTaskSlotsPerExecutor >= 0)`) or would take for a real value
+  (`enableDumping` only checks the key is present).
 
 ## Testing
 
 - `org.apache.gluten.config.NativeConfRegistrySuite` (gluten-core) covers the declaration API:
-  which channel each of the four methods delivers on, `passDefault` in parsed form and its
-  constraint checks, `nativeTransform`, Spark fallback resolution, and duplicate declaration.
+  which channel each of the four methods delivers on, the declared default in parsed form and its
+  re-resolution per delivery, `nativeTransform` over both a user-set value and a resolved default,
+  Spark fallback resolution, and duplicate declaration.
 - `org.apache.gluten.config.NativeConfPassingSuite` (gluten-substrait) covers the delivered
   result end to end: what `getNativeSessionConf` / `getNativeBackendConf` actually select,
-  including byte-string normalization, per-channel scoping and the always-present defaults.
+  including byte-string normalization, per-channel scoping, where the default comes from (Gluten's
+  own, Spark's declaration, or nowhere) and the keys that are delivered only when set.
 - `org.apache.gluten.config.ShuffleCodecConfSuite` (gluten-substrait) covers the shuffle codec's
   fallback resolution and its reported origin.
 - `org.apache.gluten.component.ComponentSuite` (gluten-core) covers the `Component.confs()` hook:

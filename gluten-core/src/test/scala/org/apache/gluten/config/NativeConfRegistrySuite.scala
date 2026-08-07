@@ -16,7 +16,7 @@
  */
 package org.apache.gluten.config
 
-import org.apache.spark.network.util.ByteUnit
+import org.apache.spark.network.util.{ByteUnit, JavaUtils}
 import org.apache.spark.sql.internal.MapProvider
 
 import org.scalatest.funsuite.AnyFunSuite
@@ -58,32 +58,16 @@ class NativeConfRegistrySuite extends AnyFunSuite {
     def declareJvmOnly(): Unit = buildConf(JVM_ONLY).booleanConf.createWithDefault(false)
 
     def declareForeignModifiable(): Unit =
-      registerConf(FOREIGN_MODIFIABLE)
-        .booleanConf
-        .passToNative()
-        .passDefault()
-        .createWithDefault(false)
+      registerConf(FOREIGN_MODIFIABLE).booleanConf.passToNative().createWithDefault(false)
 
     def declareForeignStatic(): Unit =
-      registerStaticConf(FOREIGN_STATIC)
-        .stringConf
-        .passToNative()
-        .passDefault()
-        .createWithDefault("snappy")
+      registerStaticConf(FOREIGN_STATIC).stringConf.passToNative().createWithDefault("snappy")
 
     def declareBytesDefault(key: String): Unit =
-      buildConf(key)
-        .passToNative()
-        .passDefault()
-        .bytesConf(ByteUnit.BYTE)
-        .createWithDefaultString("1KB")
+      buildConf(key).passToNative().bytesConf(ByteUnit.BYTE).createWithDefaultString("1KB")
 
     def declareDynamicDefault(key: String, defaultFunc: () => String): Unit =
-      buildConf(key)
-        .passToNative()
-        .passDefault()
-        .stringConf
-        .createWithDefaultFunction(defaultFunc)
+      buildConf(key).passToNative().stringConf.createWithDefaultFunction(defaultFunc)
 
     def declareSparkFallback(key: String): ConfigEntrySparkFallback[String] =
       registerConf(key)
@@ -92,11 +76,7 @@ class NativeConfRegistrySuite extends AnyFunSuite {
         .fallbackConf("spark.gluten.test.native.fallbackTarget.conf", "sparkDefault")
 
     def declareForeignStaticWithDefault(key: String): Unit =
-      registerStaticConf(key)
-        .stringConf
-        .passToNative()
-        .passDefault()
-        .createWithDefault("declaredDefault")
+      registerStaticConf(key).stringConf.passToNative().createWithDefault("declaredDefault")
 
     def declareTransform(key: String): Unit =
       registerConf(key)
@@ -105,11 +85,12 @@ class NativeConfRegistrySuite extends AnyFunSuite {
         .nativeTransform(_.toUpperCase(Locale.ROOT))
         .createOptional
 
-    def declarePassDefaultWithoutPassToNative(key: String): Unit =
-      buildConf(key).passDefault().booleanConf.createWithDefault(true)
-
-    def declarePassDefaultWithoutDefault(key: String): Unit =
-      buildConf(key).passToNative().passDefault().stringConf.createOptional
+    def declareTransformWithDefault(key: String): Unit =
+      registerConf(key)
+        .stringConf
+        .passToNative()
+        .nativeTransform(v => (JavaUtils.byteStringAs(v, ByteUnit.KiB) * 1024).toString)
+        .createWithDefaultString("32k")
 
     def declareForeignWithoutPassToNative(key: String): Unit =
       registerConf(key).stringConf.createOptional
@@ -162,7 +143,7 @@ class NativeConfRegistrySuite extends AnyFunSuite {
     }
   }
 
-  test("passDefault delivers the entry default in parsed form") {
+  test("an unset conf is delivered with its declared default, in parsed form") {
     val bytesKey = "spark.gluten.test.native.withBytesDefault.conf"
     withRegisteredKeys(bytesKey) {
       // A bytes conf default is passed as the parsed value in bytes, not the raw string.
@@ -171,7 +152,7 @@ class NativeConfRegistrySuite extends AnyFunSuite {
     }
   }
 
-  test("passDefault re-resolves a dynamic default on each delivery") {
+  test("a dynamic default is re-resolved on each delivery") {
     val key = "spark.gluten.test.native.dynamicDefault.conf"
     withRegisteredKeys(key) {
       // Mirrors a Spark conf whose default follows mutable JVM state, e.g.
@@ -209,30 +190,22 @@ class NativeConfRegistrySuite extends AnyFunSuite {
     }
   }
 
-  test("nativeTransform is applied to user-set values but not to the default") {
+  test("nativeTransform is applied to a user-set value and to a resolved default alike") {
     val key = "spark.gluten.test.native.transform.conf"
     withRegisteredKeys(key) {
       TestConfig.declareTransform(key)
       assert(selectRuntime(Map(key -> "legacy"), key) === Map(key -> "LEGACY"))
+      // No default declared, so nothing is delivered when unset.
       assert(selectRuntime(Map.empty[String, String], key).isEmpty)
     }
-  }
 
-  test("passDefault without passToNative is rejected") {
-    val key = "spark.gluten.test.native.defaultWithoutPass.conf"
-    withRegisteredKeys(key) {
-      assertThrows[IllegalArgumentException] {
-        TestConfig.declarePassDefaultWithoutPassToNative(key)
-      }
-    }
-  }
-
-  test("passDefault on an entry without default value is rejected") {
-    val key = "spark.gluten.test.native.optionalNoDefault.conf"
-    withRegisteredKeys(key) {
-      assertThrows[IllegalArgumentException] {
-        TestConfig.declarePassDefaultWithoutDefault(key)
-      }
+    val sizeKey = "spark.gluten.test.native.transformWithDefault.conf"
+    withRegisteredKeys(sizeKey) {
+      // A declared default may be a raw string too - Spark's own default for
+      // `spark.shuffle.file.buffer` is "32k" - so the transform has to run over it as well.
+      TestConfig.declareTransformWithDefault(sizeKey)
+      assert(selectRuntime(Map.empty[String, String], sizeKey) === Map(sizeKey -> "32768"))
+      assert(selectRuntime(Map(sizeKey -> "64k"), sizeKey) === Map(sizeKey -> "65536"))
     }
   }
 
