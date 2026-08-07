@@ -181,13 +181,15 @@ object GlutenCoreConfig extends ConfigRegistry {
   val NUM_TASK_SLOTS_PER_EXECUTOR =
     buildConf("spark.gluten.numTaskSlotsPerExecutor")
       .passToNative()
-      .passDefault()
       .doc(
-        "Must provide default value since non-execution operations " +
-          "(e.g. org.apache.spark.sql.Dataset#summary) doesn't propagate configurations using " +
-          "org.apache.spark.sql.execution.SQLExecution#withSQLConfPropagated")
+        "Number of task slots per executor, set by GlutenPlugin from the actual resource " +
+          "configuration. No default value: the value cannot be derived without a SparkConf at " +
+          "hand, and native rejects a placeholder - `GLUTEN_CHECK(numTaskSlotsPerExecutor >= 0)` " +
+          "in VeloxBackend. Native warns and falls back to 1 when the key is absent, which is what " +
+          "non-execution operations (e.g. org.apache.spark.sql.Dataset#summary) hit, since they do " +
+          "not propagate configurations via SQLExecution#withSQLConfPropagated.")
       .intConf
-      .createWithDefaultString("-1")
+      .createOptional
 
   // Since https://github.com/apache/gluten/issues/5439.
   val DYNAMIC_OFFHEAP_SIZING_ENABLED =

@@ -54,10 +54,12 @@ class NativeConfPassingSuite extends AnyFunSuiteLike {
     assert(selected(GlutenConfig.SPARK_SHUFFLE_SPILL_DISK_WRITE_BUFFER_SIZE) === "1024")
   }
 
-  test("byte-string confs are absent when not set by user") {
+  test("an unset byte-string conf is normalized from Spark's own default too") {
     val selected = sessionConf()
-    assert(!selected.contains(GlutenConfig.SPARK_SHUFFLE_FILE_BUFFER))
-    assert(!selected.contains(GlutenConfig.SPARK_UNSAFE_SORTER_SPILL_READER_BUFFER_SIZE))
+    // Spark declares "32k" for spark.shuffle.file.buffer, so the resolved default has to go through
+    // the same normalization as a user-set value would.
+    assert(selected(GlutenConfig.SPARK_SHUFFLE_FILE_BUFFER) === "32768")
+    assert(selected(GlutenConfig.SPARK_UNSAFE_SORTER_SPILL_READER_BUFFER_SIZE) === "1048576")
   }
 
   test("timeParserPolicy is upper-cased for native") {
@@ -66,6 +68,8 @@ class NativeConfPassingSuite extends AnyFunSuiteLike {
     // upper-casing on both channels is safe.
     assert(sessionConf(key -> "legacy")(key) === "LEGACY")
     assert(backendConf(key -> "legacy")(key) === "LEGACY")
+    // Spark's own default reaches native the same way.
+    assert(sessionConf()(key) === "EXCEPTION")
   }
 
   test("a session-mutable foreign conf reaches both channels") {
@@ -92,7 +96,7 @@ class NativeConfPassingSuite extends AnyFunSuiteLike {
     assert(!sessionConf(key -> "true").contains(key))
   }
 
-  test("passDefault delivers the parsed default when the conf is unset") {
+  test("a Gluten conf's own default is delivered when unset, in parsed form") {
     // A bytes conf whose default string is "64MB" is delivered as a byte count.
     assert(
       sessionConf()(GlutenConfig.GLUTEN_COLUMNAR_TO_ROW_MEM_THRESHOLD.key) === "67108864")
@@ -102,16 +106,40 @@ class NativeConfPassingSuite extends AnyFunSuiteLike {
     assert(selected(GlutenConfig.GLUTEN_COLUMNAR_TO_ROW_MEM_THRESHOLD.key) === "32768")
   }
 
-  test("S3 connection confs carry their default on both channels") {
-    // Native has its own fallback for these, and it does not always agree with the value Gluten
-    // declares, so the declared default is what both channels deliver.
+  test("a Spark conf's default is taken from Spark's own declaration") {
+    // Nothing is restated on the Gluten side for these, so they cannot drift from Spark's defaults.
+    assert(sessionConf()(SQLConf.CASE_SENSITIVE.key) === "false")
+    assert(sessionConf()(SQLConf.MAP_KEY_DEDUP_POLICY.key) === "EXCEPTION")
+    assert(sessionConf()(SQLConf.ANSI_ENABLED.key) === SQLConf.ANSI_ENABLED.defaultValueString)
+    assert(sessionConf()(GlutenConfig.SPARK_SHUFFLE_SPILL_COMPRESS) === "true")
+    // A user-set value still wins.
+    assert(sessionConf(SQLConf.CASE_SENSITIVE.key -> "true")(SQLConf.CASE_SENSITIVE.key) === "true")
+  }
+
+  test("a conf with no declared default anywhere is delivered only when set") {
+    // A Hadoop key that no Spark entry declares: native's own handling of an absent key applies,
+    // which for the S3 credentials is what tells it no credentials were configured.
+    assert(!sessionConf().contains(GlutenConfig.SPARK_S3_ACCESS_KEY))
+    assert(
+      sessionConf(GlutenConfig.SPARK_S3_ACCESS_KEY -> "ak")(
+        GlutenConfig.SPARK_S3_ACCESS_KEY) === "ak")
+    // A Gluten conf declared with `createOptional`, for the same reason - `enableDumping` checks
+    // whether the key is present at all.
+    assert(!sessionConf().contains(GlutenConfig.BENCHMARK_SAVE_DIR.key))
+  }
+
+  test("a Gluten-side default is declared only where it departs from Hadoop's") {
     Seq(backendConf(), sessionConf()).foreach {
       selected =>
-        assert(selected(GlutenConfig.SPARK_S3_CONNECTION_SSL_ENABLED) === "false")
+        // No Spark entry declares these Hadoop keys, so Gluten declares the default itself where its
+        // choice departs from what native falls back to: `ConfigExtractor` falls back to `false` for
+        // path.style.access and `25` for connection.maximum, and has no fallback for retry.limit.
         assert(selected(GlutenConfig.SPARK_S3_PATH_STYLE_ACCESS) === "true")
-        assert(selected(GlutenConfig.SPARK_S3_USE_INSTANCE_CREDENTIALS) === "false")
         assert(selected(GlutenConfig.SPARK_S3_RETRY_MAX_ATTEMPTS) === "20")
         assert(selected(GlutenConfig.SPARK_S3_CONNECTION_MAXIMUM) === "15")
+        // Native's fallback already agrees, so no default is declared and nothing is delivered.
+        assert(!selected.contains(GlutenConfig.SPARK_S3_CONNECTION_SSL_ENABLED))
+        assert(!selected.contains(GlutenConfig.SPARK_S3_USE_INSTANCE_CREDENTIALS))
     }
 
     val userSet = sessionConf(GlutenConfig.SPARK_S3_CONNECTION_SSL_ENABLED -> "true")

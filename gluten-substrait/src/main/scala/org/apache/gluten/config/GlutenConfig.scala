@@ -341,7 +341,7 @@ class GlutenConfig(conf: SQLConf) extends GlutenCoreConfig(conf) {
 
   def benchmarkTaskId: String = getConf(BENCHMARK_TASK_TASK_ID)
 
-  def benchmarkSaveDir: String = getConf(BENCHMARK_SAVE_DIR)
+  def benchmarkSaveDir: Option[String] = getConf(BENCHMARK_SAVE_DIR)
 
   def textInputMaxBlockSize: Long = getConf(TEXT_INPUT_ROW_MAX_BLOCK_SIZE)
 
@@ -476,7 +476,6 @@ object GlutenConfig extends ConfigRegistry {
   val SPARK_UNSAFE_SORTER_SPILL_READER_BUFFER_SIZE = "spark.unsafe.sorter.spill.reader.buffer.size"
   val SPARK_SHUFFLE_SPILL_DISK_WRITE_BUFFER_SIZE = "spark.shuffle.spill.diskWriteBufferSize"
   val SPARK_SHUFFLE_SPILL_COMPRESS = "spark.shuffle.spill.compress"
-  val SPARK_SHUFFLE_SPILL_COMPRESS_DEFAULT: Boolean = true
   // The codec `spark.gluten.sql.columnar.shuffle.codec` falls back to, and its Spark default.
   val SPARK_IO_COMPRESSION_CODEC = "spark.io.compression.codec"
   val SPARK_IO_COMPRESSION_CODEC_DEFAULT = "lz4"
@@ -499,7 +498,10 @@ object GlutenConfig extends ConfigRegistry {
     // registrations are in place before native confs are selected.
     GlutenCoreConfig.ensureRegistered()
 
-    // Spark SQL confs read by native, passed when set by user.
+    // Spark SQL confs read by native. A key the user did not set is delivered with the default
+    // declared by Spark's own entry, resolved at delivery time - see
+    // `GlutenConfigUtil.resolveDeclaredDefault`. Nothing is restated here, so no Gluten-side default
+    // can drift from Spark's across versions.
     registerConf(SQLConf.LEGACY_SIZE_OF_NULL.key).stringConf.passToNative().createOptional
     registerConf(SQLConf.JSON_GENERATOR_IGNORE_NULL_FIELDS.key)
       .stringConf
@@ -528,56 +530,26 @@ object GlutenConfig extends ConfigRegistry {
       .passToNative()
       .nativeTransform(_.toUpperCase(Locale.ROOT))
       .createOptional
-
-    // Spark SQL confs that native relies on being always present. Spark's own default is mirrored
-    // rather than restated, so it cannot drift across Spark versions. The mirror is a function
-    // rather than a value because a Spark default may itself be dynamic - `spark.sql.session
-    // .timeZone` resolves to the current JVM default time zone - and reading it once here would pin
-    // whatever it happened to be while this conf object was initializing.
-    registerConf(SQLConf.CASE_SENSITIVE.key)
-      .stringConf
-      .passToNative()
-      .passDefault()
-      .createWithDefaultFunction(() => SQLConf.CASE_SENSITIVE.defaultValueString)
-    registerConf(SQLConf.IGNORE_MISSING_FILES.key)
-      .stringConf
-      .passToNative()
-      .passDefault()
-      .createWithDefaultFunction(() => SQLConf.IGNORE_MISSING_FILES.defaultValueString)
-    registerConf(SQLConf.MAP_KEY_DEDUP_POLICY.key)
-      .stringConf
-      .passToNative()
-      .passDefault()
-      .createWithDefaultFunction(() => SQLConf.MAP_KEY_DEDUP_POLICY.defaultValueString)
-    registerConf(SQLConf.ANSI_ENABLED.key)
-      .stringConf
-      .passToNative()
-      .passDefault()
-      .createWithDefaultFunction(() => SQLConf.ANSI_ENABLED.defaultValueString)
+    registerConf(SQLConf.CASE_SENSITIVE.key).stringConf.passToNative().createOptional
+    registerConf(SQLConf.IGNORE_MISSING_FILES.key).stringConf.passToNative().createOptional
     registerConf(SQLConf.LEGACY_STATISTICAL_AGGREGATE.key)
       .stringConf
       .passToNative()
-      .passDefault()
-      .createWithDefaultFunction(() => SQLConf.LEGACY_STATISTICAL_AGGREGATE.defaultValueString)
+      .createOptional
     registerConf(SQLConf.DECIMAL_OPERATIONS_ALLOW_PREC_LOSS.key)
       .stringConf
       .passToNative()
-      .passDefault()
-      .createWithDefaultFunction(
-        () =>
-          SQLConf.DECIMAL_OPERATIONS_ALLOW_PREC_LOSS.defaultValueString)
-    registerConf(SQLConf.SESSION_LOCAL_TIMEZONE.key)
-      .stringConf
-      .passToNative()
-      .passDefault()
-      .createWithDefaultFunction(() => SQLConf.SESSION_LOCAL_TIMEZONE.defaultValueString)
+      .createOptional
+    registerConf(SQLConf.MAP_KEY_DEDUP_POLICY.key).stringConf.passToNative().createOptional
+    registerConf(SQLConf.ANSI_ENABLED.key).stringConf.passToNative().createOptional
+    // Spark's default here is the current JVM default time zone, so it must be resolved per delivery
+    // rather than once at declaration - a session, or a test, may change it in between.
+    registerConf(SQLConf.SESSION_LOCAL_TIMEZONE.key).stringConf.passToNative().createOptional
 
-    // Spark core confs. Size strings (e.g. "64k") are normalized to numbers in bytes for native.
-    registerConf(SPARK_SHUFFLE_SPILL_COMPRESS)
-      .booleanConf
-      .passToNative()
-      .passDefault()
-      .createWithDefault(SPARK_SHUFFLE_SPILL_COMPRESS_DEFAULT)
+    // Spark core confs. Size strings (e.g. "64k") are normalized to numbers in bytes for native,
+    // which also applies to the default resolved from Spark - `spark.shuffle.file.buffer` defaults
+    // to the string "32k".
+    registerConf(SPARK_SHUFFLE_SPILL_COMPRESS).booleanConf.passToNative().createOptional
     registerConf(SPARK_REDACTION_REGEX).stringConf.passToNative().createOptional
     registerConf(SPARK_UNSAFE_SORTER_SPILL_READER_BUFFER_SIZE)
       .stringConf
@@ -595,8 +567,10 @@ object GlutenConfig extends ConfigRegistry {
       .nativeTransform(v => (JavaUtils.byteStringAs(v, ByteUnit.KiB) * 1024).toString)
       .createOptional
 
-    // Object store (S3/GCS) confs, passed when set by user. In backend scope they are also covered
-    // by the `spark.hadoop.fs.s3a.` / `spark.hadoop.fs.gs.` prefix rules.
+    // Hadoop-owned S3/GCS keys. No Spark entry declares them, so nothing is resolved for an unset
+    // key and native's own fallback applies - which is what the credential keys need, since native
+    // branches on whether they are present at all. In backend scope they are also covered by the
+    // `spark.hadoop.fs.s3a.` / `spark.hadoop.fs.gs.` prefix rules.
     registerConf(SPARK_S3_ACCESS_KEY).stringConf.passToNative().createOptional
     registerConf(SPARK_S3_SECRET_KEY).stringConf.passToNative().createOptional
     registerConf(SPARK_S3_ENDPOINT).stringConf.passToNative().createOptional
@@ -610,37 +584,15 @@ object GlutenConfig extends ConfigRegistry {
       .stringConf
       .passToNative()
       .createOptional
-    // S3 connection confs. Native has its own fallback for these when the key is absent, and it
-    // does not always agree with the value Gluten passes: `path.style.access` falls back to
-    // `false` in `ConfigExtractor` while Gluten declares `true` here. Declaring the default makes
-    // Gluten's value the one native sees on both channels, which is the intent - the previous
-    // behavior, where the write path silently got a different default from the read path, was a
-    // latent inconsistency rather than a contract.
-    registerConf(SPARK_S3_CONNECTION_SSL_ENABLED)
-      .booleanConf
-      .passToNative()
-      .passDefault()
-      .createWithDefault(false)
-    registerConf(SPARK_S3_PATH_STYLE_ACCESS)
-      .booleanConf
-      .passToNative()
-      .passDefault()
-      .createWithDefault(true)
-    registerConf(SPARK_S3_USE_INSTANCE_CREDENTIALS)
-      .booleanConf
-      .passToNative()
-      .passDefault()
-      .createWithDefault(false)
-    registerConf(SPARK_S3_RETRY_MAX_ATTEMPTS)
-      .intConf
-      .passToNative()
-      .passDefault()
-      .createWithDefault(20)
-    registerConf(SPARK_S3_CONNECTION_MAXIMUM)
-      .intConf
-      .passToNative()
-      .passDefault()
-      .createWithDefault(15)
+    registerConf(SPARK_S3_CONNECTION_SSL_ENABLED).booleanConf.passToNative().createOptional
+    registerConf(SPARK_S3_USE_INSTANCE_CREDENTIALS).booleanConf.passToNative().createOptional
+    // These three declare a Gluten-side default because Gluten's choice departs from what native
+    // falls back to: `path.style.access` falls back to `false` in `ConfigExtractor` while Gluten
+    // wants `true`, `connection.maximum` to `25` while Gluten wants `15`, and `retry.limit` has no
+    // native fallback at all.
+    registerConf(SPARK_S3_PATH_STYLE_ACCESS).booleanConf.passToNative().createWithDefault(true)
+    registerConf(SPARK_S3_RETRY_MAX_ATTEMPTS).intConf.passToNative().createWithDefault(20)
+    registerConf(SPARK_S3_CONNECTION_MAXIMUM).intConf.passToNative().createWithDefault(15)
 
     // Datasource confs read once during native backend initialization.
     registerStaticConf(SPARK_SQL_PARQUET_COMPRESSION_CODEC)
@@ -1247,7 +1199,6 @@ object GlutenConfig extends ConfigRegistry {
   val GLUTEN_COLUMNAR_TO_ROW_MEM_THRESHOLD =
     buildConf("spark.gluten.sql.columnarToRowMemoryThreshold")
       .passToNative()
-      .passDefault()
       .bytesConf(ByteUnit.BYTE)
       .createWithDefaultString("64MB")
 
@@ -1332,7 +1283,6 @@ object GlutenConfig extends ConfigRegistry {
     buildConf("spark.gluten.memory.backtrace.allocation")
       .internal()
       .passToNative()
-      .passDefault()
       .doc("Print backtrace information for large memory allocations. This helps debugging when " +
         "Spark OOM happens due to large acquire requests.")
       .booleanConf
@@ -1433,7 +1383,6 @@ object GlutenConfig extends ConfigRegistry {
     buildStaticConf("spark.gluten.sql.debug.cudf")
       .internal()
       .passToNative()
-      .passDefault()
       .booleanConf
       .createWithDefault(false)
 
@@ -1465,8 +1414,10 @@ object GlutenConfig extends ConfigRegistry {
     buildConf("spark.gluten.saveDir")
       .internal()
       .passToNative()
+      // No default: `VeloxRuntime::enableDumping` checks the key is present, not that it is
+      // non-empty, so delivering an empty default would let it proceed with an empty dump path.
       .stringConf
-      .createWithDefault("")
+      .createOptional
 
   val NATIVE_WRITER_ENABLED =
     buildConf("spark.gluten.sql.native.writer.enabled")

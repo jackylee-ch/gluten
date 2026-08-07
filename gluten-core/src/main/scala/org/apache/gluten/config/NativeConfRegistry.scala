@@ -39,20 +39,21 @@ object NativeScope extends Enumeration {
  *
  * @param key
  *   the conf key.
- * @param defaultToPass
- *   if it yields a defined value, the default value is passed to native side even when the conf is
- *   not explicitly set by user. Use this when native side relies on the key being always present.
- *   If it yields None, the conf is passed only when it's set by user. Re-evaluated on each
- *   selection rather than snapshotted at registration, since some defaults are dynamic, e.g.
- *   `spark.sql.session.timeZone` defaults to the current JVM default time zone.
+ * @param declaredDefault
+ *   the default declared by the conf's own entry, or `None` when it declares `createOptional`. Read
+ *   per delivery rather than snapshotted here, since a default may be dynamic - see
+ *   `TypedConfigBuilder.createWithDefaultFunction`. A Spark- or Hadoop-owned key usually declares
+ *   no Gluten-side default and is then resolved from its owner instead, see
+ *   `GlutenConfigUtil.resolveSparkDeclaredDefault`.
  * @param transform
- *   if defined, applied to the user-set value before passing to native. Useful for value
- *   normalization, e.g. converting size strings like "64k" to byte numbers, or upper-casing. Not
- *   applied to `defaultToPass`.
+ *   if defined, applied to the value before passing to native. Useful for value normalization, e.g.
+ *   converting size strings like "64k" to byte numbers, or upper-casing. Applied to a resolved
+ *   default the same way as to a user-set value, since a default may be a raw string too - Spark's
+ *   own default for `spark.shuffle.file.buffer` is "32k".
  */
 case class NativeConfEntry(
     key: String,
-    defaultToPass: () => Option[String] = () => None,
+    declaredDefault: () => Option[String] = () => None,
     transform: Option[String => String] = None)
 
 /**
@@ -76,8 +77,13 @@ case class NativeConfEntry(
  * when its conf object is loaded, so e.g. Velox-only keys never leak into a ClickHouse deployment.
  *
  * Runtime and backend scopes are tracked separately, so the same key can be registered with
- * different semantics per scope, e.g. filter-only in runtime scope while always-passed with a
- * default value in backend scope.
+ * different semantics per scope.
+ *
+ * A registered key that the user did not set is delivered with its declared default, resolved at
+ * delivery time: the default declared here if the conf declares one, otherwise the one declared by
+ * Spark for a Spark-owned key, via `GlutenConfigUtil.resolveSparkDeclaredDefault`. No conf states
+ * "also pass my default"; a conf that genuinely has no default declares `createOptional` and is
+ * then delivered only when set, which is how native's own fallback is left in charge.
  */
 object NativeConfRegistry {
   import NativeScope._
@@ -92,18 +98,20 @@ object NativeConfRegistry {
    * declaring `passToNative` is created; conf objects declare their native confs through the
    * builders instead of calling this directly.
    *
-   * @param defaultToPass
-   *   if it yields a defined value, the default value is passed even when the conf is not set by
-   *   user. Evaluated lazily on each selection so dynamic defaults stay up to date.
+   * @param declaredDefault
+   *   the default declared by the conf itself, evaluated per delivery so a dynamic default stays up
+   *   to date. `None` for a `createOptional` conf, which then falls back to the owner's declaration
+   *   for a Spark-owned key, or is delivered only when set.
    * @param transform
-   *   if defined, applied to the user-set value before passing.
+   *   if defined, applied to the value before passing, whether it comes from the user or from a
+   *   resolved default.
    */
   private[config] def register(
       key: String,
       scope: NativeScope,
-      defaultToPass: => Option[String] = None,
+      declaredDefault: => Option[String] = None,
       transform: Option[String => String] = None): Unit = {
-    val entry = NativeConfEntry(key, () => defaultToPass, transform)
+    val entry = NativeConfEntry(key, () => declaredDefault, transform)
     scope match {
       case RUNTIME => doRegister(runtimeEntries, entry)
       case BACKEND => doRegister(backendEntries, entry)
@@ -125,16 +133,16 @@ object NativeConfRegistry {
   def isBackendKey(key: String): Boolean = backendEntries.contains(key)
 
   /**
-   * Select runtime-scoped native confs from the given conf map. Entries with `defaultToPass`
-   * defined are always included, using the default value when not set in `conf`.
+   * Select runtime-scoped native confs from the given conf map. A key absent from `conf` is
+   * delivered with its declared default, if it has one.
    */
   def selectRuntimeConf(conf: scala.collection.Map[String, String]): Map[String, String] = {
     select(runtimeEntries, conf)
   }
 
   /**
-   * Select backend(static)-scoped native confs from the given conf map. Entries with
-   * `defaultToPass` defined are always included, using the default value when not set in `conf`.
+   * Select backend(static)-scoped native confs from the given conf map. A key absent from `conf` is
+   * delivered with its declared default, if it has one.
    */
   def selectBackendConf(conf: scala.collection.Map[String, String]): Map[String, String] = {
     select(backendEntries, conf)
@@ -145,11 +153,11 @@ object NativeConfRegistry {
       conf: scala.collection.Map[String, String]): Map[String, String] = {
     entries.values.flatMap {
       entry =>
-        val value = conf.get(entry.key) match {
-          case Some(v) => Some(entry.transform.map(_(v)).getOrElse(v))
-          case None => entry.defaultToPass()
-        }
-        value.map(v => entry.key -> v)
+        // A key the user did not set falls back to its declared default, resolved now rather than
+        // snapshotted at declaration - a default may follow JVM or session state, e.g. Spark's
+        // default for `spark.sql.session.timeZone` is the current JVM default time zone.
+        val raw = conf.get(entry.key).orElse(entry.declaredDefault())
+        raw.map(v => entry.key -> entry.transform.map(_(v)).getOrElse(v))
     }.toMap
   }
 
