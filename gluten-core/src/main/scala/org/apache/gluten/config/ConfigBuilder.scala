@@ -107,7 +107,7 @@ private[gluten] case class ConfigBuilder(key: String) {
    * Declaring `createOptional` therefore means "pass only when set", which leaves native's own
    * fallback in charge. The config is registered to [[NativeConfRegistry]] on entry creation.
    *
-   * The native scope follows the conf's mutability, so there is no scope argument:
+   * Which delivery channels it lands on follows the conf's mutability, so there is no argument:
    *   - `buildConf` / `registerConf`: modifiable at any time and usable at any time. Delivered both
    *     during native backend initialization and on each native runtime creation, so native
    *     observes the current value wherever it reads the key.
@@ -139,17 +139,24 @@ private[gluten] case class ConfigBuilder(key: String) {
     if (!_passToNative) {
       return
     }
-    // The scope follows the conf's mutability. A modifiable conf is delivered on both channels so
+    // The channel follows the conf's mutability. A modifiable conf is delivered on both channels so
     // native observes the current value wherever it reads the key; a static conf is set while the
     // native backend is initialized and not modifiable afterwards, so delivering it once there is
     // lossless.
-    val scope = if (_isStatic) NativeScope.BACKEND else NativeScope.ALL
-    NativeConfRegistry.register(key, scope, declaredDefault(entry), _nativeTransform)
+    NativeConfRegistry.register(key, _isStatic, declaredDefault(entry), _nativeTransform)
   }
 
   /**
    * The default delivered to native for a key the user did not set. Read per delivery rather than
    * snapshotted, so an entry whose default is dynamic keeps delivering its current value.
+   *
+   * Note this is derived from the entry, not stated by the caller: a conf that declares a default
+   * always delivers it. There is deliberately no way to say "has a JVM-side default, do not deliver
+   * it" - a conf whose declared value is a placeholder rather than a value (a sentinel computed
+   * later, e.g. by `GlutenPlugin.setPredefinedConfigs`) must declare `createOptional`, so that its
+   * JVM-side type says the same thing. `spark.gluten.numTaskSlotsPerExecutor` and
+   * `spark.gluten.memory.task.offHeap.size.in.bytes` are the two such confs; native reads an absent
+   * key as "unbounded" or warns, which is what a placeholder would have overridden.
    */
   private def declaredDefault(entry: ConfigEntry[_]): Option[String] = entry match {
     // A fallback entry reports the *target* conf's default as its own, and the target is delivered

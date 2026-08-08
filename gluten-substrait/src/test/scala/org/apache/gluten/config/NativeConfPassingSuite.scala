@@ -20,7 +20,7 @@ import org.apache.spark.sql.internal.SQLConf
 
 import org.scalatest.funsuite.AnyFunSuiteLike
 
-import java.util.TimeZone
+import java.util.{Locale, TimeZone}
 
 import scala.collection.JavaConverters._
 
@@ -68,8 +68,11 @@ class NativeConfPassingSuite extends AnyFunSuiteLike {
     // upper-casing on both channels is safe.
     assert(sessionConf(key -> "legacy")(key) === "LEGACY")
     assert(backendConf(key -> "legacy")(key) === "LEGACY")
-    // Spark's own default reaches native the same way.
-    assert(sessionConf()(key) === "EXCEPTION")
+    // Spark's own default reaches native the same way. Read it from Spark's entry rather than
+    // restating it: it is EXCEPTION up to Spark 3.5 and CORRECTED from 4.0 on.
+    assert(
+      sessionConf()(key) ===
+        SQLConf.LEGACY_TIME_PARSER_POLICY.defaultValueString.toUpperCase(Locale.ROOT))
   }
 
   test("a session-mutable foreign conf reaches both channels") {
@@ -107,10 +110,17 @@ class NativeConfPassingSuite extends AnyFunSuiteLike {
   }
 
   test("a Spark conf's default is taken from Spark's own declaration") {
-    // Nothing is restated on the Gluten side for these, so they cannot drift from Spark's defaults.
-    assert(sessionConf()(SQLConf.CASE_SENSITIVE.key) === "false")
-    assert(sessionConf()(SQLConf.MAP_KEY_DEDUP_POLICY.key) === "EXCEPTION")
-    assert(sessionConf()(SQLConf.ANSI_ENABLED.key) === SQLConf.ANSI_ENABLED.defaultValueString)
+    // Read each expectation from Spark's own entry rather than restating it - a restated default is
+    // exactly the drift this mechanism removes, and several of these differ across Spark versions.
+    Seq(
+      SQLConf.CASE_SENSITIVE,
+      SQLConf.MAP_KEY_DEDUP_POLICY,
+      SQLConf.ANSI_ENABLED,
+      SQLConf.IGNORE_MISSING_FILES,
+      SQLConf.LEGACY_STATISTICAL_AGGREGATE,
+      SQLConf.DECIMAL_OPERATIONS_ALLOW_PREC_LOSS
+    ).foreach(e => assert(sessionConf()(e.key) === e.defaultValueString))
+    // A Spark core key resolves the same way, from `ConfigEntry.findEntry`.
     assert(sessionConf()(GlutenConfig.SPARK_SHUFFLE_SPILL_COMPRESS) === "true")
     // A user-set value still wins.
     assert(sessionConf(SQLConf.CASE_SENSITIVE.key -> "true")(SQLConf.CASE_SENSITIVE.key) === "true")
@@ -131,9 +141,10 @@ class NativeConfPassingSuite extends AnyFunSuiteLike {
   test("a Gluten-side default is declared only where it departs from Hadoop's") {
     Seq(backendConf(), sessionConf()).foreach {
       selected =>
-        // No Spark entry declares these Hadoop keys, so Gluten declares the default itself where its
-        // choice departs from what native falls back to: `ConfigExtractor` falls back to `false` for
-        // path.style.access and `25` for connection.maximum, and has no fallback for retry.limit.
+        // No Spark entry declares these Hadoop keys, so Gluten declares the default itself where
+        // its choice departs from what native falls back to: `ConfigExtractor` falls back to
+        // `false` for path.style.access and `25` for connection.maximum, and has no fallback for
+        // retry.limit.
         assert(selected(GlutenConfig.SPARK_S3_PATH_STYLE_ACCESS) === "true")
         assert(selected(GlutenConfig.SPARK_S3_RETRY_MAX_ATTEMPTS) === "20")
         assert(selected(GlutenConfig.SPARK_S3_CONNECTION_MAXIMUM) === "15")

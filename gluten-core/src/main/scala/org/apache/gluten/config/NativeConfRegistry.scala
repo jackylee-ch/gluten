@@ -16,23 +16,9 @@
  */
 package org.apache.gluten.config
 
-import scala.collection.JavaConverters._
+import org.apache.spark.internal.Logging
 
-/**
- * The native scope where a conf is passed to, i.e. when the conf is delivered from JVM to native
- * side.
- *
- *   - RUNTIME: the conf is dynamic. It is passed to native side each time a native runtime instance
- *     is created, e.g. per task pipeline / native memory manager. See
- *     `GlutenConfig.getNativeSessionConf`.
- *   - BACKEND: the conf is static to native backend. It is passed to native side once during native
- *     backend initialization. See `GlutenConfig.getNativeBackendConf`.
- *   - ALL: the conf is passed in both of the above cases.
- */
-object NativeScope extends Enumeration {
-  type NativeScope = Value
-  val RUNTIME, BACKEND, ALL = Value
-}
+import scala.collection.JavaConverters._
 
 /**
  * A registration of one conf key that should be passed to native side.
@@ -68,16 +54,22 @@ case class NativeConfEntry(
  *   - `registerConf` / `registerStaticConf` for Spark / Hadoop keys that have no Gluten
  *     `ConfigEntry`, which declare the native delivery only.
  *
- * The native scope follows the conf's mutability, so no caller states it: a modifiable conf
- * (`buildConf` / `registerConf`) goes to both channels, a static one (`buildStaticConf` /
- * `registerStaticConf`) to BACKEND. Registration happens automatically on entry creation, hence
- * [[register]] is meant for `ConfigBuilder` rather than for conf objects.
+ * Registration happens automatically on entry creation, hence [[register]] is meant for
+ * `ConfigBuilder` rather than for conf objects.
  *
  * Registrations are naturally modular: a backend's or connector's registrations only take effect
  * when its conf object is loaded, so e.g. Velox-only keys never leak into a ClickHouse deployment.
  *
- * Runtime and backend scopes are tracked separately, so the same key can be registered with
- * different semantics per scope.
+ * There are two delivery channels, matching the two lifecycle stages of a native backend, and which
+ * ones a conf lands on follows its mutability rather than any argument:
+ *
+ *   - backend: delivered once during native backend initialization. See
+ *     `GlutenConfig.getNativeBackendConf`. A static conf (`buildStaticConf` / `registerStaticConf`)
+ *     goes here only, since a snapshot taken at init is its value forever.
+ *   - runtime: delivered each time a native runtime instance is created, e.g. per task pipeline /
+ *     native memory manager. See `GlutenConfig.getNativeSessionConf`. A modifiable conf
+ *     (`buildConf` / `registerConf`) goes here *and* to the backend channel, so native observes the
+ *     current value wherever it reads the key.
  *
  * A registered key that the user did not set is delivered with its declared default, resolved at
  * delivery time: the default declared here if the conf declares one, otherwise the one declared by
@@ -85,19 +77,28 @@ case class NativeConfEntry(
  * "also pass my default"; a conf that genuinely has no default declares `createOptional` and is
  * then delivered only when set, which is how native's own fallback is left in charge.
  */
-object NativeConfRegistry {
-  import NativeScope._
+object NativeConfRegistry extends Logging {
 
   private val runtimeEntries =
     new java.util.concurrent.ConcurrentHashMap[String, NativeConfEntry]().asScala
   private val backendEntries =
     new java.util.concurrent.ConcurrentHashMap[String, NativeConfEntry]().asScala
 
+  // The backend channel is delivered once, during native backend initialization, so a registration
+  // arriving afterwards can never reach it: the conf would show up on the runtime channel only, and
+  // native would keep using its own fallback wherever it reads the key at init. Latched on first
+  // delivery so a late declaration is reported rather than silently half-applied.
+  @volatile private var backendConfDelivered = false
+
   /**
    * Register a conf key to be passed to native side. Called by `ConfigBuilder` when an entry
    * declaring `passToNative` is created; conf objects declare their native confs through the
    * builders instead of calling this directly.
    *
+   * @param isStatic
+   *   whether the conf is static to the native backend, i.e. declared by `buildStaticConf` /
+   *   `registerStaticConf`. A static conf is delivered on the backend channel only; a modifiable
+   *   one on both.
    * @param declaredDefault
    *   the default declared by the conf itself, evaluated per delivery so a dynamic default stays up
    *   to date. `None` for a `createOptional` conf, which then falls back to the owner's declaration
@@ -108,17 +109,28 @@ object NativeConfRegistry {
    */
   private[config] def register(
       key: String,
-      scope: NativeScope,
+      isStatic: Boolean,
       declaredDefault: => Option[String] = None,
       transform: Option[String => String] = None): Unit = {
     val entry = NativeConfEntry(key, () => declaredDefault, transform)
-    scope match {
-      case RUNTIME => doRegister(runtimeEntries, entry)
-      case BACKEND => doRegister(backendEntries, entry)
-      case ALL =>
-        doRegister(runtimeEntries, entry)
-        doRegister(backendEntries, entry)
+    if (!isStatic) {
+      doRegister(runtimeEntries, entry)
     }
+    doRegisterToBackend(entry)
+  }
+
+  private def doRegisterToBackend(entry: NativeConfEntry): Unit = {
+    if (backendConfDelivered) {
+      // Not fatal: the conf still works on the runtime channel, and failing here would take down a
+      // query for a conf object that merely loaded late. But native backend init has already
+      // happened, so declare the gap loudly - the usual cause is a conf object that is not declared
+      // through `Component.confs()`.
+      logWarning(
+        s"Native conf ${entry.key} was declared after native backend conf had already been " +
+          s"delivered, so it will not reach the backend channel. Declare its conf object through " +
+          s"Component.confs() so that it is initialized before native backend initialization.")
+    }
+    doRegister(backendEntries, entry)
   }
 
   private def doRegister(
@@ -143,8 +155,13 @@ object NativeConfRegistry {
   /**
    * Select backend(static)-scoped native confs from the given conf map. A key absent from `conf` is
    * delivered with its declared default, if it has one.
+   *
+   * Marks the backend channel as delivered, so that a declaration arriving afterwards - which can
+   * no longer reach native backend initialization - is reported rather than silently applied to the
+   * runtime channel alone.
    */
   def selectBackendConf(conf: scala.collection.Map[String, String]): Map[String, String] = {
+    backendConfDelivered = true
     select(backendEntries, conf)
   }
 
@@ -165,5 +182,10 @@ object NativeConfRegistry {
   private[config] def unregister(key: String): Unit = {
     runtimeEntries.remove(key)
     backendEntries.remove(key)
+  }
+
+  /** Visible for testing: lets a suite re-declare after having exercised a backend delivery. */
+  private[config] def resetBackendDeliveredForTesting(): Unit = {
+    backendConfDelivered = false
   }
 }

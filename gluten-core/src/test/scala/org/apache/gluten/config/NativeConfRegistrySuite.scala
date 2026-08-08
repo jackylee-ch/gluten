@@ -92,6 +92,9 @@ class NativeConfRegistrySuite extends AnyFunSuite {
         .nativeTransform(v => (JavaUtils.byteStringAs(v, ByteUnit.KiB) * 1024).toString)
         .createWithDefaultString("32k")
 
+    def declareForeign(key: String): Unit =
+      registerConf(key).stringConf.passToNative().createOptional
+
     def declareForeignWithoutPassToNative(key: String): Unit =
       registerConf(key).stringConf.createOptional
 
@@ -187,6 +190,27 @@ class NativeConfRegistrySuite extends AnyFunSuite {
       // Only a user-set value is delivered to native side; the fallback is a JVM-side notion.
       assert(selectRuntime(Map(key -> "own"), key) === Map(key -> "own"))
       assert(selectRuntime(Map.empty[String, String], key).isEmpty)
+    }
+  }
+
+  test("a Spark key backed by a fallback entry delivers nothing rather than a sentinel") {
+    // Spark renders an entry's default for display, not for consumption: `FallbackConfigEntry`
+    // yields "<value of other.key>" and `OptionalConfigEntry` yields "<undefined>". Neither may
+    // reach native as a value - and for a key carrying a `nativeTransform`, parsing one would throw
+    // on every task. `spark.locality.wait.process` is `fallbackConf(LOCALITY_WAIT)` and
+    // `spark.driver.log.dfsDir` is `createOptional` in every supported Spark version.
+    Seq("spark.locality.wait.process", "spark.driver.log.dfsDir").foreach {
+      key =>
+        withRegisteredKeys(key) {
+          TestConfig.declareForeign(key)
+          val selected = selectRuntime(Map.empty[String, String], key)
+          assert(
+            selected.isEmpty,
+            s"$key must not be delivered, but got ${selected.get(key)}"
+          )
+          // A user-set value is still delivered.
+          assert(selectRuntime(Map(key -> "3s"), key) === Map(key -> "3s"))
+        }
     }
   }
 
