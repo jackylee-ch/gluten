@@ -33,18 +33,24 @@ leaked into common code.
 There are exactly two points where the JVM delivers confs to native, matching the two lifecycle
 stages of a native backend:
 
-| `NativeScope` | Delivery point | JVM entry | Native receiver |
+| Channel | Delivery point | JVM entry | Native receiver |
 |---|---|---|---|
-| `BACKEND` | Once, during native backend initialization | `GlutenConfig.getNativeBackendConf` | e.g. Velox `VeloxBackend::init` (`backendConf_`), CH `BackendInitializerUtil` |
-| `RUNTIME` | Each time a native runtime instance is created (per task pipeline / native memory manager) | `GlutenConfig.getNativeSessionConf` | e.g. Velox `VeloxRuntime` (`confMap_` / `veloxCfg_`) |
+| backend | Once, during native backend initialization | `GlutenConfig.getNativeBackendConf` | e.g. Velox `VeloxBackend::init` (`backendConf_`), CH `BackendInitializerUtil` |
+| runtime | Each time a native runtime instance is created (per task pipeline / native memory manager) | `GlutenConfig.getNativeSessionConf` | e.g. Velox `VeloxRuntime` (`confMap_` / `veloxCfg_`) |
 
-`NativeScope.ALL` means both. The two channels land in separate native config objects and never
+A modifiable conf lands on both. The two channels land in separate native config objects and never
 merge: `backendConf_` holds only backend conf, `veloxCfg_` only session conf, and each read site
 sees exactly one of them. (The one place both are visible is the Iceberg writer, which merges the
 backend map underneath the session map, so the session value wins and the backend one acts as a
 fallback.)
 
-### Mutability determines the scope
+Because the backend channel is delivered exactly once, a conf object that initializes *after* that
+delivery can only reach the runtime channel. `NativeConfRegistry` latches the backend channel on
+first delivery and logs a warning naming any key declared afterwards, so the gap is reported rather
+than silently half-applied. Declaring the conf object through `Component.confs()` (below) is what
+avoids it.
+
+### Mutability determines the channels
 
 The scope is not stated by the caller. It follows the conf's mutability, which is what the
 declaration method already says:
@@ -55,7 +61,7 @@ declaration method already says:
   `registerStaticConf`). Delivered **once during native backend initialization**; a snapshot taken
   there is the value, forever.
 
-That is the whole rule. There is no scope argument anywhere in the API, and no way for a caller to
+That is the whole rule. There is no channel argument anywhere in the API, and no way for a caller to
 ask for a combination that contradicts the conf's declared mutability.
 
 Consequently, re-declaring a conf's mutability is the way to change its native delivery — and it is
@@ -222,14 +228,14 @@ object AcmeConfig extends ConfigRegistry {
 }
 ```
 
-This is the only supported way for a component to get its confs into the **BACKEND** channel.
+This is the only supported way for a component to get its confs into the **backend** channel.
 Registering from `onDriverStart` is too late: backends are root nodes of the component DAG, so a
 backend's `onDriverStart` — which is where native backend initialization happens — runs before any
 dependent component's. Runtime-incompatible components are skipped, so an excluded component's
 confs never reach native side.
 
 Everything above works from outside the `org.apache.gluten` package: `ConfigRegistry`,
-`ConfigEntry`, `NativeConfRegistry` and `NativeScope` are public, and the four declaration methods
+`ConfigEntry` and `NativeConfRegistry` are public, and the four declaration methods
 are `protected` members of `ConfigRegistry`. An out-of-tree backend can also call
 `MyConfig.ensureRegistered()` from its `ListenerApi` instead of using `confs()`.
 
@@ -272,7 +278,7 @@ per conf:
 |---|---|---|
 | `spark.gluten.sql.debug` | keeps user glog levels | per-task input/plan debug dumps |
 | `spark.gluten.sql.columnar.cudf` | one-time GPU environment initialization | per-query CPU/GPU offload decision. Enabling in-session without startup enablement will not initialize the GPU |
-| `spark.gluten.memory.task.offHeap.size.in.bytes` | CH external sort/aggregation thresholds | Velox per-task spill memory limit |
+| `spark.gluten.memory.task.offHeap.size.in.bytes` | CH external sort/aggregation thresholds | Velox partial-aggregation memory limits |
 | `spark.gluten.velox.awsSdkLogLevel`, `spark.gluten.velox.s3UseProxyFromEnv`, `spark.gluten.velox.s3PayloadSigningPolicy` | reused HiveConnector construction | re-read on each data source sink creation, see below |
 | `spark.sql.legacy.statisticalAggregate`, `spark.sql.decimalOperations.allowPrecisionLoss`, `spark.sql.legacy.timeParserPolicy` | expression/aggregate behavior fixed into reused backend structures | per-query expression evaluation |
 | `spark.hadoop.fs.s3a.*` connection confs (ssl, path-style, retry attempts, connection maximum, ...) | reused HiveConnector construction | per-query file system access, see below |
@@ -301,17 +307,19 @@ per stage when a new resource profile is applied, and JVM-side readers observe t
 values:
 
 - `spark.gluten.numTaskSlotsPerExecutor` — native reads it at backend init only (Velox io/spill
-  thread sizing), and warns and falls back to 1 when the key is missing. Declared `createOptional`,
-  since the value cannot be derived without a SparkConf at hand and a placeholder would fail native's
-  `GLUTEN_CHECK(numTaskSlotsPerExecutor >= 0)`.
-- `spark.gluten.memory.offHeap.size.in.bytes` — native reads it at backend init only (CH spill
-  thresholds).
+  thread sizing), and warns and falls back to 1 when the key is missing.
+- `spark.gluten.memory.offHeap.size.in.bytes` — no native reader (the key is declared in
+  `cpp/core/config/GlutenConfig.h` but read nowhere); the ClickHouse backend reads it JVM-side off
+  the conf map. Not declared `passToNative()`.
 - `spark.gluten.memory.task.offHeap.size.in.bytes` — read on both sides, see the table above.
 
-The latter two still declare `0` as their default, which is a placeholder in the same sense: the real
-value is computed by `GlutenPlugin.setPredefinedConfigs`. Native's fallback for an absent key is
-`kMaxMemory`, so `0` is not what native should see; making them `createOptional` requires deciding
-what their JVM-side accessors return instead, which is left to a follow-up.
+The first and last are declared `createOptional`, because the value cannot be derived without a
+SparkConf at hand and every candidate placeholder is one native would take literally: `-1` fails
+`GLUTEN_CHECK(numTaskSlotsPerExecutor >= 0)`, and `0` for task off-heap collapses the
+partial-aggregation limits where native's absent-key fallback is `kMaxMemory`. The same reasoning
+applies to `spark.gluten.memoryOverhead.size.in.bytes` (static, so not in this list): its `0` would
+have built the Velox global memory manager with zero capacity instead of taking
+`VeloxBackend::init`'s `kMaxMemory` branch.
 
 These stay modifiable because they are genuinely session-mutable, not because a static declaration
 would break the rewrite: `SQLConf.setConfString` does not reject static keys (that guard lives in
@@ -319,9 +327,9 @@ would break the rewrite: `SQLConf.setConfString` does not reject static keys (th
 hold, break `SET` on them, and mislabel them in the generated configuration docs.
 
 Backend note: the ClickHouse backend calls `getNativeBackendConf` both at `initNative` and per
-kernel pipeline, so for CH the BACKEND scope effectively refreshes per query as well; the
-Velox backend consumes BACKEND scope strictly once at init. The scope contract above is
-defined by the stricter (Velox) behavior.
+kernel pipeline, so for CH the backend channel effectively refreshes per query as well; the
+Velox backend consumes it strictly once at init. The contract above is defined by the stricter
+(Velox) behavior.
 
 ## Object initialization
 
@@ -334,7 +342,7 @@ The initialization points, in the order they run:
 
 1. `Component.confs()` — Gluten calls `ensureRegistered()` on every registered component's conf
    objects right after component discovery, before any `onDriverStart` / `onExecutorStart`. This is
-   the recommended hook, and the only one early enough for the BACKEND channel. `VeloxBackend` and
+   the recommended hook, and the only one early enough for the backend channel. `VeloxBackend` and
    `CHBackend` declare `VeloxConfig` / `CHConfig` through it.
 2. Explicit calls for special cases: `GlutenConfig` calls `GlutenCoreConfig.ensureRegistered()`
    before its own registrations, and `VeloxListenerApi.parseConf` / `CHListenerApi` call their
@@ -351,7 +359,7 @@ The initialization points, in the order they run:
   added shortly before this change and never overridden by any backend; the declaration API
   supersedes them, and an out-of-tree backend migrates by declaring its conf object through
   `Component.confs()`. Unlike the removed `Set[String]` hooks, a declaration can express
-  per-channel scope, defaults and value normalization.
+  per-channel delivery, defaults and value normalization.
 - `GlutenConfigUtil.mapByteConfValue` (superseded by `nativeTransform`).
 - `spark.gluten.velox.fs.s3a.retry.mode`, which had no native reader: native reads the retry mode
   from `spark.hadoop.fs.s3a.retry.mode`, and the gluten-namespaced key was orphaned when the S3

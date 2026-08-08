@@ -120,7 +120,7 @@ class VeloxListenerApi extends ListenerApi with Logging {
           s" the recommended size ${ByteUnit.BYTE.toMiB(desiredOverheadSize)}MiB." +
           s" This may cause OOM.")
     }
-    conf.set(GlutenCoreConfig.COLUMNAR_OVERHEAD_SIZE_IN_BYTES, overheadSize)
+    conf.set(GlutenCoreConfig.COLUMNAR_OVERHEAD_SIZE_IN_BYTES.key, overheadSize.toString)
 
     // Sql table cache serializer.
     if (conf.get(GlutenConfig.COLUMNAR_TABLE_CACHE_ENABLED)) {

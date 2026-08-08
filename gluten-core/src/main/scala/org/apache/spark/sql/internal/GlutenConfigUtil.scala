@@ -55,7 +55,12 @@ object GlutenConfigUtil {
    * default in Spark 4.0.
    *
    * Yields `None` for a key Spark does not declare - a Hadoop key such as `spark.hadoop.fs.s3a.*` -
-   * or one declared without a default, which leaves native's own fallback in charge.
+   * and for one Spark declares without a real default, which leaves native's own fallback in
+   * charge. `defaultValue` is the discriminator rather than `defaultValueString`, because the
+   * latter is a *display* string: `OptionalConfigEntry` renders it as `<undefined>` and
+   * `FallbackConfigEntry` as `<value of other.key>`, and shipping either verbatim would hand native
+   * a sentinel instead of a value - or throw, for a key carrying a `nativeTransform`. Both are
+   * exactly the two subclasses whose `defaultValue` is `None`.
    *
    * Resolution happens per delivery rather than once at declaration, because a Spark default may
    * itself be dynamic: `spark.sql.session.timeZone` resolves to the current JVM default time zone.
@@ -63,7 +68,6 @@ object GlutenConfigUtil {
   def resolveSparkDeclaredDefault(key: String): Option[String] = {
     Option(SQLConf.getConfigEntry(key))
       .orElse(Option(SparkConfigEntry.findEntry(key)))
-      .map(_.defaultValueString)
-      .filterNot(_ == SparkConfigEntry.UNDEFINED)
+      .collect { case e if e.defaultValue.isDefined => e.defaultValueString }
   }
 }

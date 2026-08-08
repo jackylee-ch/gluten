@@ -500,8 +500,8 @@ object GlutenConfig extends ConfigRegistry {
 
     // Spark SQL confs read by native. A key the user did not set is delivered with the default
     // declared by Spark's own entry, resolved at delivery time - see
-    // `GlutenConfigUtil.resolveDeclaredDefault`. Nothing is restated here, so no Gluten-side default
-    // can drift from Spark's across versions.
+    // `GlutenConfigUtil.resolveSparkDeclaredDefault`. Nothing is restated here, so no Gluten-side
+    // default can drift from Spark's across versions.
     registerConf(SQLConf.LEGACY_SIZE_OF_NULL.key).stringConf.passToNative().createOptional
     registerConf(SQLConf.JSON_GENERATOR_IGNORE_NULL_FIELDS.key)
       .stringConf
@@ -542,8 +542,8 @@ object GlutenConfig extends ConfigRegistry {
       .createOptional
     registerConf(SQLConf.MAP_KEY_DEDUP_POLICY.key).stringConf.passToNative().createOptional
     registerConf(SQLConf.ANSI_ENABLED.key).stringConf.passToNative().createOptional
-    // Spark's default here is the current JVM default time zone, so it must be resolved per delivery
-    // rather than once at declaration - a session, or a test, may change it in between.
+    // Spark's default here is the current JVM default time zone, so it must be resolved per
+    // delivery rather than once at declaration - a session, or a test, may change it in between.
     registerConf(SQLConf.SESSION_LOCAL_TIMEZONE.key).stringConf.passToNative().createOptional
 
     // Spark core confs. Size strings (e.g. "64k") are normalized to numbers in bytes for native,

@@ -155,7 +155,7 @@ private object GlutenDriverPlugin extends Logging {
     val taskSlots = SparkResourceUtil.getTaskSlots(conf)
     conf.set(GlutenCoreConfig.NUM_TASK_SLOTS_PER_EXECUTOR.key, taskSlots.toString)
     val offHeapPerTask = offHeapSize / taskSlots
-    conf.set(GlutenCoreConfig.COLUMNAR_TASK_OFFHEAP_SIZE_IN_BYTES, offHeapPerTask)
+    conf.set(GlutenCoreConfig.COLUMNAR_TASK_OFFHEAP_SIZE_IN_BYTES.key, offHeapPerTask.toString)
 
     // Pessimistic off-heap sizes, with the assumption that all non-borrowable storage memory
     // determined by spark.memory.storageFraction was used.
