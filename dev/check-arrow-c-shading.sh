@@ -14,24 +14,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Verify the bundled gluten-velox jar's Arrow C-Data classes have method
-# signatures referencing the *unshaded* org.apache.arrow.memory.BufferAllocator
-# and org.apache.arrow.vector.* types — not the gluten-shaded copies.
+# Verify the bundled gluten-velox jar's Arrow C-Data classes reference the
+# *unshaded* Apache Arrow API — both in their method signatures and in their
+# constant pools.
 #
 # Background: org.apache.arrow.c.* must NOT be relocated (its native JNI binds
-# to the original class names), but its public API methods accept/return
-# org.apache.arrow.memory.* and org.apache.arrow.vector.* types. Those types
-# must therefore also stay unshaded in the bundle, otherwise the bundled
-# ArrowArrayStream/ArrowSchema get re-bound to the shaded BufferAllocator at
-# compile time and any caller passing a vanilla Apache Arrow allocator hits
-# `NoSuchMethodError`. See gluten#12225.
+# to the original class names), but it reaches into three other Arrow packages:
+# org.apache.arrow.memory.*, org.apache.arrow.vector.* (public signatures) and
+# org.apache.arrow.util.* (internal calls — Preconditions, AutoCloseables,
+# Collections2). All three must stay unshaded in the bundle:
+#
+#   - a shaded *signature* type re-binds the bundled ArrowArrayStream/ArrowSchema
+#     so any caller passing a vanilla Apache Arrow allocator hits
+#     `NoSuchMethodError` (gluten#12225);
+#   - a shaded *constant-pool* reference is worse when Arrow is no longer
+#     bundled at all: the shaded target does not exist anywhere on the
+#     classpath and the call site throws `ClassNotFoundException`.
 #
 # Usage:
 #   dev/check-arrow-c-shading.sh <path-to-gluten-velox-bundle.jar>
 #
 # Exit codes:
-#   0 — bundle is well-shaded (Arrow C-Data API uses public Apache Arrow types)
-#   1 — bundle is broken (Arrow C-Data API references gluten-shaded types)
+#   0 — bundle is well-shaded (Arrow C-Data API uses public Apache Arrow API)
+#   1 — bundle is broken (Arrow C-Data references gluten-shaded types)
 #   2 — usage / setup error
 
 set -euo pipefail
@@ -76,12 +81,29 @@ for cls in "${CLASSES[@]}"; do
   fi
 done
 
+# Second check: no org.apache.arrow.c.* class may *call* a shaded Arrow class.
+# Signatures alone miss org.apache.arrow.util.Preconditions & friends, which are
+# invoked from constructors but never appear in a descriptor.
+mkdir -p "$WORKDIR/all"
+unzip -qo "$JAR" 'org/apache/arrow/c/*' -d "$WORKDIR/all" 2>/dev/null || true
+if compgen -G "$WORKDIR/all/org/apache/arrow/c/*.class" > /dev/null; then
+  refs=$(grep -rahoE "org/apache/gluten/shaded/org/apache/arrow/[a-zA-Z0-9/$]+" \
+    "$WORKDIR/all/org/apache/arrow/c" 2>/dev/null | sort -u || true)
+  if [[ -n "$refs" ]]; then
+    echo "  FAIL org/apache/arrow/c/** — calls into gluten-shaded Arrow:"
+    echo "$refs" | sed 's/^/    /'
+    failures=$((failures + 1))
+  else
+    echo "  OK   org/apache/arrow/c/** constant pools"
+  fi
+fi
+
 if (( failures > 0 )); then
   echo
-  echo "Bundle has $failures Arrow C-Data class(es) with shaded API types."
+  echo "Bundle has $failures Arrow C-Data shading problem(s)."
   echo "See gluten#12225 for context. Update package/pom.xml's"
-  echo "<relocation org.apache.arrow> excludes to also exclude"
-  echo "org.apache.arrow.memory.** and org.apache.arrow.vector.**."
+  echo "<relocation org.apache.arrow> excludes so every package reachable"
+  echo "from org.apache.arrow.c stays unshaded (memory, vector, util)."
   exit 1
 fi
 

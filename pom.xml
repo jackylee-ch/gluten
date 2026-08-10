@@ -82,6 +82,22 @@
     <uniffle.version>0.10.0</uniffle.version>
     <arrow.version>15.0.0</arrow.version>
     <arrow-memory.artifact>arrow-memory-unsafe</arrow-memory.artifact>
+    <!--
+      Scope of gluten's Arrow dependencies. `compile` means gluten ships its own
+      Arrow inside the bundle jar; `provided` means the Spark distribution on the
+      runtime classpath owns Arrow and gluten only compiles against it. Spark 4.x
+      already ships an Arrow new enough for gluten, so those profiles switch to
+      `provided`.
+    -->
+    <arrow.deps.scope>compile</arrow.deps.scope>
+    <!--
+      groupId used in the Arrow <exclusion>s on the Spark dependencies below.
+      Set to `org.apache.arrow` (the real groupId) the exclusions apply, so
+      gluten's own bundled Arrow wins. Profiles that use `provided` Arrow
+      override this with a groupId that matches nothing, letting Spark's Arrow
+      through instead.
+    -->
+    <spark.arrow.exclusion.groupId>org.apache.arrow</spark.arrow.exclusion.groupId>
     <hadoop.version>2.7.4</hadoop.version>
     <antlr4.version>4.9.3</antlr4.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -186,7 +202,7 @@
         <scope>provided</scope>
         <exclusions>
           <exclusion>
-            <groupId>org.apache.arrow</groupId>
+            <groupId>${spark.arrow.exclusion.groupId}</groupId>
             <artifactId>arrow-vector</artifactId>
           </exclusion>
           <exclusion>
@@ -242,7 +258,7 @@
         <scope>provided</scope>
         <exclusions>
           <exclusion>
-            <groupId>org.apache.arrow</groupId>
+            <groupId>${spark.arrow.exclusion.groupId}</groupId>
             <artifactId>*</artifactId>
           </exclusion>
         </exclusions>
@@ -339,7 +355,7 @@
         <scope>test</scope>
         <exclusions>
           <exclusion>
-            <groupId>org.apache.arrow</groupId>
+            <groupId>${spark.arrow.exclusion.groupId}</groupId>
             <artifactId>*</artifactId>
           </exclusion>
         </exclusions>
@@ -352,7 +368,7 @@
         <scope>test</scope>
         <exclusions>
           <exclusion>
-            <groupId>org.apache.arrow</groupId>
+            <groupId>${spark.arrow.exclusion.groupId}</groupId>
             <artifactId>*</artifactId>
           </exclusion>
           <exclusion>
@@ -1302,6 +1318,9 @@
         <log4j.version>2.24.3</log4j.version>
         <commons-lang3.version>3.17.0</commons-lang3.version>
         <arrow.version>18.1.0</arrow.version>
+        <arrow.deps.scope>provided</arrow.deps.scope>
+        <!-- Matches no groupId: let Spark's own Arrow through. -->
+        <spark.arrow.exclusion.groupId>none</spark.arrow.exclusion.groupId>
         <scala.compiler.version>4.9.2</scala.compiler.version>
       </properties>
       <dependencies>
@@ -1380,7 +1399,10 @@
         <slf4j.version>2.0.16</slf4j.version>
         <log4j.version>2.24.3</log4j.version>
         <commons-lang3.version>3.17.0</commons-lang3.version>
-        <arrow.version>18.1.0</arrow.version>
+        <arrow.version>18.3.0</arrow.version>
+        <arrow.deps.scope>provided</arrow.deps.scope>
+        <!-- Matches no groupId: let Spark's own Arrow through. -->
+        <spark.arrow.exclusion.groupId>none</spark.arrow.exclusion.groupId>
         <scala.compiler.version>4.9.5</scala.compiler.version>
       </properties>
       <dependencies>
