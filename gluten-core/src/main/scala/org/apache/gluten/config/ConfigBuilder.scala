@@ -39,7 +39,7 @@ private[gluten] case class ConfigBuilder(key: String) {
   private[config] var _isStatic = false
   private[config] var _passToNative = false
   private[config] var _isForeign = false
-  private[config] var _nativeTransform: Option[String => String] = None
+  private[config] var _deliverForeignDefault = false
 
   def doc(s: String): ConfigBuilder = {
     _doc = s
@@ -93,8 +93,8 @@ private[gluten] case class ConfigBuilder(key: String) {
    * `registerStaticConf`.
    *
    * A foreign config is not registered as a Gluten config entry and not registered to `SQLConf`
-   * (its owner already did that); the builder is only used to declare how the key is delivered to
-   * native side.
+   * (Spark or Hadoop already did that); the builder is only used to declare how the key is
+   * delivered to native side.
    */
   private[config] def markForeign(): ConfigBuilder = {
     _isForeign = true
@@ -102,10 +102,41 @@ private[gluten] case class ConfigBuilder(key: String) {
   }
 
   /**
-   * Marks this config to be passed to native side. A value set by user is passed as is; when the
-   * user did not set it, the conf's declared default is passed instead, resolved at delivery time.
-   * Declaring `createOptional` therefore means "pass only when set", which leaves native's own
-   * fallback in charge. The config is registered to [[NativeConfRegistry]] on entry creation.
+   * Marks this foreign config as delivering the default declared by Spark / Hadoop for the key,
+   * resolved freshly at each delivery. Set by `createWithForeignDefault`, which is only meaningful
+   * for a foreign config: a Gluten config states its default in `createWithDefault(value)` instead.
+   */
+  private[config] def markDeliverForeignDefault(): ConfigBuilder = {
+    require(
+      _isForeign,
+      s"Config $key: createWithForeignDefault is only valid for registerConf() / " +
+        s"registerStaticConf(), since a Gluten config has no Spark / Hadoop declaration to " +
+        s"resolve a default from. Use createWithDefault(value) instead."
+    )
+    _deliverForeignDefault = true
+    this
+  }
+
+  /**
+   * Marks this config to be passed to native side. A value set by the user is always delivered;
+   * what happens when it is not set is stated by the terminal method, which is the whole of the
+   * rule:
+   *
+   *   - `createOptional`: nothing is delivered, leaving native's own fallback in charge. This is
+   *     the common case for a foreign key, since native usually declares the same fallback Spark /
+   *     Hadoop does, or branches on the key being absent at all.
+   *   - `createWithForeignDefault` (foreign only): the default Spark / Hadoop declares for the key
+   *     is delivered, resolved freshly at each delivery. Use it when native's fallback is wrong or
+   *     missing, and the foreign default is either computed at runtime
+   *     (`spark.sql.session.timeZone` follows the JVM default time zone) or has changed across
+   *     Spark versions (`spark.sql.ansi.enabled` flipped its default in 4.0). Never restate such a
+   *     default on the Gluten side - that is exactly what drifts.
+   *   - `createWithDefault(value)`: the stated value is delivered. For a Gluten config this is its
+   *     own default; for a foreign one it says Gluten deliberately departs from what both Spark /
+   *     Hadoop and native would apply, e.g. `fs.s3a.path.style.access` where native falls back to
+   *     `false` and Gluten wants `true`.
+   *
+   * The config is registered to [[NativeConfRegistry]] on entry creation.
    *
    * Which delivery channels it lands on follows the conf's mutability, so there is no argument:
    *   - `buildConf` / `registerConf`: modifiable at any time and usable at any time. Delivered both
@@ -120,14 +151,35 @@ private[gluten] case class ConfigBuilder(key: String) {
   }
 
   /**
-   * Normalizes a value before it is passed to native side, e.g. converting a size string like "64k"
-   * to a number of bytes, or upper-casing. Applied to a resolved default the same way as to a
-   * user-set value, since a default may be a raw string too - Spark's own default for
-   * `spark.shuffle.file.buffer` is "32k".
+   * Normalizes a value for native side through the conf's own value converter, i.e. the one chosen
+   * by `stringConf` / `bytesConf(unit)` / `intConf` / ... plus any `transform`. A conf therefore
+   * states how its value is parsed exactly once, at its declaration, and both a user-set value and
+   * a resolved default go through it.
+   *
+   * This is what makes a size conf reach native as a number rather than as "64k": a
+   * `bytesConf(ByteUnit.KiB)` yields the KiB count the foreign entry would yield, and a
+   * `bytesConf(ByteUnit.BYTE)` the byte count. A foreign conf declares the same converter Spark /
+   * Hadoop declares, so JVM and native agree on the value's meaning and native applies whatever
+   * unit conversion it needs on top - `spark.shuffle.file.buffer` is KiB on both sides, and native
+   * multiplies by 1024.
+   *
+   * Falls back to the raw string when the entry has no usable converter (e.g. a fallback entry),
+   * since delivering the value unchanged is always better than dropping it.
    */
-  def nativeTransform(fn: String => String): ConfigBuilder = {
-    _nativeTransform = Some(fn)
-    this
+  private def convertForNative(entry: ConfigEntry[_], raw: String): String = {
+    try {
+      entry.valueConverter(raw) match {
+        // An `OptionalConfigEntry` wraps its converter's result in `Option`.
+        case o: Option[_] => o.map(_.toString).getOrElse(raw)
+        case null => raw
+        case v => v.toString
+      }
+    } catch {
+      // A value Spark or Hadoop would reject is not this mechanism's business to validate: Spark or
+      // Hadoop raises on it at its own read site, with its own message. Deliver it unchanged rather
+      // than failing conf selection, which runs per task.
+      case _: IllegalArgumentException => raw
+    }
   }
 
   private[config] def registerToNative(entry: ConfigEntry[_]): Unit = {
@@ -143,34 +195,36 @@ private[gluten] case class ConfigBuilder(key: String) {
     // native observes the current value wherever it reads the key; a static conf is set while the
     // native backend is initialized and not modifiable afterwards, so delivering it once there is
     // lossless.
-    NativeConfRegistry.register(key, _isStatic, declaredDefault(entry), _nativeTransform)
+    NativeConfRegistry.register(
+      key,
+      _isStatic,
+      convert = convertForNative(entry, _),
+      declaredDefault = declaredDefault(entry))
   }
 
   /**
-   * The default delivered to native for a key the user did not set. Read per delivery rather than
-   * snapshotted, so an entry whose default is dynamic keeps delivering its current value.
+   * The default delivered to native for a key the user did not set, or `None` to deliver nothing
+   * and leave native's own fallback in charge. Read per delivery rather than snapshotted, so a
+   * default that follows JVM or session state keeps delivering its current value.
    *
-   * Note this is derived from the entry, not stated by the caller: a conf that declares a default
-   * always delivers it. There is deliberately no way to say "has a JVM-side default, do not deliver
-   * it" - a conf whose declared value is a placeholder rather than a value (a sentinel computed
-   * later, e.g. by `GlutenPlugin.setPredefinedConfigs`) must declare `createOptional`, so that its
-   * JVM-side type says the same thing. `spark.gluten.numTaskSlotsPerExecutor` and
-   * `spark.gluten.memory.task.offHeap.size.in.bytes` are the two such confs; native reads an absent
-   * key as "unbounded" or warns, which is what a placeholder would have overridden.
+   * Which of the three the caller gets is stated by the terminal method - see [[passToNative]].
    */
   private def declaredDefault(entry: ConfigEntry[_]): Option[String] = entry match {
     // A fallback entry reports the *target* conf's default as its own, and the target is delivered
     // under its own key. Delivering it here would also contradict the user: with only the target
     // conf set, this key would carry the target's default rather than the value the user chose.
-    case _: ConfigEntryFallback[_] | _: ConfigEntrySparkFallback[_] => None
-    // Reading the parsed default rather than the raw default string means e.g. a "64MB" bytes conf
-    // reaches native as "67108864".
+    case _: ConfigEntryFallback[_] | _: ConfigEntryForeignFallback[_] => None
+    // `createWithForeignDefault` on a foreign key: take the foreign declaration, resolved
+    // now rather than restated on the Gluten side, so the two cannot drift across
+    // versions. The foreign default is a raw string ("32k" for
+    // `spark.shuffle.file.buffer`), so it goes through this conf's own converter just
+    // as a user-set value does.
+    case e if _deliverForeignDefault =>
+      GlutenConfigUtil.resolveForeignDeclaredDefault(key).map(convertForNative(e, _))
+    // `createWithDefault(value)`. Reading the parsed default rather than the raw
+    // default string means e.g. a "64MB" bytes conf reaches native as "67108864".
     case e if e.defaultValue.isDefined => e.defaultValue.map(_.toString)
-    // A Spark- or Hadoop-owned key that Gluten declares no default for takes the one its owner
-    // declares, so the two cannot drift across Spark versions. Yields None for a Hadoop key that no
-    // Spark entry declares, leaving native's own fallback in charge.
-    case _ if _isForeign => GlutenConfigUtil.resolveSparkDeclaredDefault(key)
-    // A Gluten conf declared `createOptional`: delivered only when set.
+    // `createOptional`: nothing is delivered when the key is not set.
     case _ => None
   }
 
@@ -269,15 +323,15 @@ private[gluten] class TypedConfigBuilder[T](
   }
 
   /**
-   * Creates an entry that falls back to a configuration owned by Spark when this one is not set,
-   * e.g. Gluten's shuffle codec falling back to `spark.io.compression.codec`. Spark's own default
+   * Creates an entry that falls back to a foreign configuration when this one is not set, e.g.
+   * Gluten's shuffle codec falling back to `spark.io.compression.codec`. The foreign default
    * applies when neither key is set, so this entry never needs a default of its own.
    *
-   * The fallback is stated by key and default value rather than as Spark's own `ConfigEntry`, which
-   * is `private[spark]` and so cannot appear in a signature outside `org.apache.spark`.
+   * The fallback is stated by key and default value rather than as the foreign `ConfigEntry`, which
+   * for Spark is `private[spark]` and so cannot appear in a signature outside `org.apache.spark`.
    */
-  def fallbackConf(fallbackKey: String, fallbackDefault: String): ConfigEntrySparkFallback[T] = {
-    val entry = new ConfigEntrySparkFallback[T](
+  def fallbackConf(fallbackKey: String, fallbackDefault: String): ConfigEntryForeignFallback[T] = {
+    val entry = new ConfigEntryForeignFallback[T](
       parent.key,
       parent._doc,
       parent._version,
@@ -323,12 +377,6 @@ private[gluten] class TypedConfigBuilder[T](
     this
   }
 
-  /** See [[ConfigBuilder.nativeTransform]]. Callable after the value type is chosen. */
-  def nativeTransform(fn: String => String): TypedConfigBuilder[T] = {
-    parent.nativeTransform(fn)
-    this
-  }
-
   def createOptional: OptionalConfigEntry[T] = {
     val entry = new OptionalConfigEntry[T](
       parent.key,
@@ -343,6 +391,17 @@ private[gluten] class TypedConfigBuilder[T](
     parent._onCreate.foreach(_(entry))
     parent.registerToNative(entry)
     entry
+  }
+
+  /**
+   * Declares the config to deliver the default Spark / Hadoop declares for the key when the user
+   * did not set it, resolved freshly at each delivery. Only valid for a foreign config declared via
+   * `registerConf` / `registerStaticConf`, since a Gluten config has no separate owner to consult -
+   * it uses [[createWithDefault(default:T)*]] instead.
+   */
+  def createWithForeignDefault: OptionalConfigEntry[T] = {
+    parent.markDeliverForeignDefault()
+    createOptional
   }
 
   def createWithDefault(default: T): ConfigEntry[T] = {

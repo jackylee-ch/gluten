@@ -28,7 +28,7 @@ class GlutenIcebergConfig(conf: SQLConf) extends GlutenCoreConfig(conf) {
 
 object GlutenIcebergConfig extends ConfigRegistry {
 
-  def get: GlutenIcebergConfig = {
+  override def get: GlutenIcebergConfig = {
     new GlutenIcebergConfig(SQLConf.get)
   }
 

@@ -153,7 +153,9 @@ object CHConfig extends ConfigRegistry {
     .stringConf
     .passToNative()
     .createOptional
-  // Declared by Spark's own `SQLConf.ORC_COMPRESSION`, whose default is resolved at delivery time.
+  // ClickHouse's transformer already fills in `snappy` when the user did not set this key
+  // (`CHTransformerApi.scala:149-164`), which matches Spark's own default. Nothing needs to be
+  // delivered when the user did not set it.
   registerStaticConf("spark.sql.orc.compression.codec")
     .doc("ORC write compression codec, consumed by ClickHouse backend init.")
     .stringConf

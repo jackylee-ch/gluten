@@ -64,14 +64,14 @@ declaration method already says:
 That is the whole rule. There is no channel argument anywhere in the API, and no way for a caller to
 ask for a combination that contradicts the conf's declared mutability.
 
-Consequently, re-declaring a conf's mutability is the way to change its native delivery — and it is
+Consequently, re-declaring a conf's mutability is the way to change its native delivery - and it is
 a user-visible change beyond conf passing: a static conf rejects `spark.conf.set` / `SET` and is
 labelled differently in the generated configuration docs. Declare a conf static only if it really
 is immutable after startup.
 
 ## Declaration API
 
-`ConfigRegistry` offers four declaration methods, split along two axes — who owns the key, and
+`ConfigRegistry` offers four declaration methods, split along two axes - who owns the key, and
 whether it is modifiable:
 
 | | Modifiable at any time | Set at backend init, then immutable |
@@ -90,11 +90,18 @@ val COLUMNAR_MAX_BATCH_SIZE =
 ```
 
 - `passToNative()`: registers the conf to `NativeConfRegistry` on entry creation. A value set by the
-  user is delivered as is; when the user did not set it, the conf's declared default is delivered
-  instead, in parsed form (a "64MB" bytes conf reaches native as "67108864").
-- `nativeTransform(fn)`: normalizes a value before delivery, e.g. a size string to a number of bytes,
-  or upper-casing. Applied to a resolved default the same way as to a user-set value, since a default
-  may be a raw string too — Spark's own default for `spark.shuffle.file.buffer` is "32k".
+  user is delivered through the conf's own value converter - the one chosen by `stringConf` /
+  `bytesConf(unit)` / `intConf` / ... plus any `transform` - so a "64MB" bytes conf reaches native
+  as "67108864", and a `timeParserPolicy` conf reaches native upper-cased even when the user wrote
+  it in lower case. When the user did not set it, the conf's declared default is delivered instead,
+  in the same converted form.
+
+The value conversion is stated once, at the declaration, by the type builder and any `transform`.
+There is no separate "normalize before delivery" step: `bytesConf(ByteUnit.KiB)` yields the KiB
+count Spark's own entry would yield (native applies any further unit conversion it needs, e.g.
+`spark.shuffle.file.buffer` is KiB on both sides and native multiplies by 1024), and
+`bytesConf(ByteUnit.BYTE)` yields a byte count directly. A foreign conf declares the same converter
+its owner declares, so JVM and native agree on the value's meaning.
 
 The default is read per delivery rather than snapshotted at declaration, so an entry declared with
 `createWithDefaultFunction` keeps delivering its current value.
@@ -102,7 +109,7 @@ The default is read per delivery rather than snapshotted at declaration, so an e
 #### When a conf should have no default
 
 The conf's own declaration decides what an unset key delivers. `createOptional` means "deliver only
-when set", which hands the decision to native's own fallback — and that is the right choice whenever
+when set", which hands the decision to native's own fallback - and that is the right choice whenever
 native has a fallback that is already correct, since declaring a redundant default only makes the JVM
 a second owner of the same value, to be kept in step by hand.
 
@@ -114,17 +121,17 @@ if (conf->valueExists(sparkKey)) { /* ... */ }              // ConfigExtractor.c
 GLUTEN_CHECK(saveDir.has_value(), kGlutenSaveDir + " is not set");
 ```
 
-For such a key, a default would defeat the check — so it must be declared `createOptional`. This is
+For such a key, a default would defeat the check - so it must be declared `createOptional`. This is
 why `spark.gluten.numTaskSlotsPerExecutor` and `spark.gluten.saveDir` have no default: their value
 cannot be derived at declaration time, and a placeholder (`-1`, `""`) would pass native's presence
 check and then fail its validation, or be used as a real value.
 
 Conversely, declare a default when leaving the key out would change behavior:
 
-- **native has no fallback and fails without the key** —
+- **native has no fallback and fails without the key** -
   `spark.gluten.sql.columnarToRowMemoryThreshold` (`GLUTEN_CHECK` in `JniWrapper.cc`) and
   `spark.gluten.memory.backtrace.allocation` (`std::unordered_map::at`) both throw when it is absent;
-- **native's fallback disagrees with what Gluten wants** — `fs.s3a.path.style.access` falls back to
+- **native's fallback disagrees with what Gluten wants** - `fs.s3a.path.style.access` falls back to
   `false` in `ConfigExtractor` where Gluten wants `true`.
 
 The markers are available both before and after the value type is chosen, so
@@ -133,12 +140,14 @@ are equivalent.
 
 ### Spark / Hadoop configurations
 
-Keys owned by Spark or Hadoop have no Gluten `ConfigEntry` and must not get one — their owner
+Keys owned by Spark or Hadoop have no Gluten `ConfigEntry` and must not get one - their owner
 already registered them, and registering again conflicts with it. `registerConf` /
 `registerStaticConf` declare only the native delivery:
 
 ```scala
-registerConf(SQLConf.ANSI_ENABLED.key).stringConf.passToNative().createOptional
+registerConf(SQLConf.CASE_SENSITIVE.key).booleanConf.passToNative().createOptional
+
+registerConf(SQLConf.SESSION_LOCAL_TIMEZONE.key).stringConf.passToNative().createWithForeignDefault
 
 registerConf(SPARK_S3_PATH_STYLE_ACCESS)
   .doc("Read by the native S3 file system.")
@@ -147,28 +156,32 @@ registerConf(SPARK_S3_PATH_STYLE_ACCESS)
   .createWithDefault(true)
 ```
 
-`createOptional` here does **not** mean "deliver only when set". For a Spark-owned key it means "the
-default is Spark's", and Gluten resolves it from Spark's own entry at delivery time — both `SQLConf`
-entries and Spark core ones. Nothing is restated on the Gluten side, so the two cannot drift across
-Spark versions; `spark.sql.ansi.enabled` alone changed default in Spark 4.0, and Spark's default for
-`spark.sql.session.timeZone` is the current JVM default time zone, which a session (or a test) may
-change after startup. Both are handled by resolving per delivery rather than once at declaration.
+The terminal method states what is delivered when the user did not set the key:
 
-Declaring a default (`createWithDefault`) states that Gluten deliberately departs from what the owner
-and native would otherwise apply — `path.style.access` above differs from both Hadoop's
-`core-default.xml` and `ConfigExtractor`'s `false`. Only do this when there is such a departure.
+- `createOptional`: nothing is delivered. Native's own fallback applies. This is the common case -
+  native usually declares the same fallback Spark/Hadoop does, or branches on the key being absent.
+- `createWithForeignDefault`: delivers the default Spark/Hadoop declares for the key,
+  resolved freshly at each delivery. Use it only when native's fallback is wrong or missing and the
+  foreign default is dynamic or version-dependent - `spark.sql.session.timeZone` follows the JVM
+  default time zone, and `spark.sql.ansi.enabled` flipped its default in Spark 4.0. Never restate
+  such a default on the Gluten side - that is exactly what drifts.
+- `createWithDefault(value)`: delivers Gluten's own chosen value. Use it only when Gluten
+  deliberately departs from what both Spark/Hadoop and native would apply -
+  `path.style.access` above differs from both Hadoop's `core-default.xml` and
+  `ConfigExtractor`'s `false`.
 
 A Hadoop key that no Spark entry declares (`spark.hadoop.fs.s3a.access.key`, ...) resolves to no
-default, and is therefore delivered only when set. That is what the S3 credential keys need, since
-native branches on whether they are present at all.
+default under `createWithForeignDefault` either, so in practice it behaves identically to
+`createOptional` for such keys. Use `createOptional` for them - it is more explicit about the
+intent.
 
 `passToNative()` is mandatory for these: a foreign conf is not read on the JVM side, so declaring
 one without delivering it to native would have no effect at all.
 
 ### Falling back to a Spark configuration
 
-When a Gluten conf is an *override* of a Spark one — the user sets it only to depart from Spark's
-choice — declare the relationship instead of hand-writing the fallback at each read site:
+When a Gluten conf is an *override* of a Spark one - the user sets it only to depart from Spark's
+choice - declare the relationship instead of hand-writing the fallback at each read site:
 
 ```scala
 val COLUMNAR_SHUFFLE_CODEC =
@@ -185,8 +198,8 @@ default, so callers never write a `None` branch. The fallback is stated by key a
 rather than as Spark's `ConfigEntry`, which is `private[spark]` and cannot appear in a signature
 outside `org.apache.spark`.
 
-A caller that must treat the two sources differently — e.g. validating an explicitly set value
-against a stricter set of allowed values — uses `readWithSource`, which returns the value together
+A caller that must treat the two sources differently - e.g. validating an explicitly set value
+against a stricter set of allowed values - uses `readWithSource`, which returns the value together
 with whether it came from the Gluten key:
 
 ```scala
@@ -201,7 +214,7 @@ the Spark key itself when the Gluten one is absent.
 
 ### Adding native confs from a backend or a component
 
-A conf object is a Scala object, so declaring one is not enough — its registrations only happen
+A conf object is a Scala object, so declaring one is not enough - its registrations only happen
 once something touches it. Declare the object through `Component.confs()` and Gluten initializes
 it, right after component discovery and before any component's `onDriverStart` /
 `onExecutorStart`:
@@ -230,7 +243,7 @@ object AcmeConfig extends ConfigRegistry {
 
 This is the only supported way for a component to get its confs into the **backend** channel.
 Registering from `onDriverStart` is too late: backends are root nodes of the component DAG, so a
-backend's `onDriverStart` — which is where native backend initialization happens — runs before any
+backend's `onDriverStart` - which is where native backend initialization happens - runs before any
 dependent component's. Runtime-incompatible components are skipped, so an excluded component's
 confs never reach native side.
 
@@ -245,7 +258,7 @@ Registrations live in the conf object of the owning module (`GlutenCoreConfig`, 
 `VeloxConfig`, `CHConfig`, ...) and take effect when that object is loaded. A backend's or
 connector's registrations therefore never leak into another deployment: Velox-only keys are
 declared in backends-velox and simply do not exist when running the ClickHouse backend, and
-vice versa — the `spark.hadoop.input.*` timeouts and `spark.sql.orc.compression.codec`, which
+vice versa - the `spark.hadoop.input.*` timeouts and `spark.sql.orc.compression.codec`, which
 only `CHTransformerApi` consumes, are declared in `CHConfig`.
 
 ## Selection at delivery time
@@ -259,13 +272,12 @@ only `CHTransformerApi` consumes, are declared in `CHConfig`.
 
 Prefix rules are pattern-based and intentionally kept: they cover open-ended key families
 (e.g. arbitrary `fs.s3a` client options) that cannot be enumerated. The registry covers the
-keys native depends on individually — especially those needing defaults or transforms.
+keys native depends on individually - especially those needing defaults or transforms.
 
-Note the registry selection runs **before** the prefix rules in both methods, and the prefix
-rules overwrite. A registered key that is also matched by a prefix rule therefore loses its
-`nativeTransform`. No current declaration hits this (all transforms are on `spark.sql.*` /
-`spark.shuffle.*` / `spark.unsafe.*` keys, none of which match a prefix rule), but a
-`spark.gluten.<backend>.*` or `...backend.<backend>.*` key must not be declared with a transform.
+Note the registry selection runs **before** the prefix rules in both methods, and `getOrElseUpdate`
+is used rather than `put` so a registry-selected value wins: overwriting it with the raw prefix
+value would bypass the entry's value converter for a registered key that also matches a prefix
+rule.
 
 ## Confs consumed on both sides of native
 
@@ -287,16 +299,16 @@ per conf:
 
 Velox's `createHiveConnectorConfig` is not backend-init-only. Besides building the reused
 `HiveConnector` from the backend conf (`VeloxBackend::init`), it is called per write from the
-**runtime** conf map, with no backend fallback merged in — see `VeloxParquetDataSourceS3::initSink`
+**runtime** conf map, with no backend fallback merged in - see `VeloxParquetDataSourceS3::initSink`
 and friends, and `IcebergWriter`. Any conf it reads must therefore be declared modifiable so it
 reaches the runtime channel too, which is why the three `spark.gluten.velox.*` S3 confs above are
 not static.
 
 No Spark entry declares the `spark.hadoop.fs.s3a.*` connection confs, so an unset one resolves to no
 default and native's own fallback applies. Three of them declare a Gluten-side default because
-Gluten's choice departs from that fallback — `path.style.access` falls back to `false` in
+Gluten's choice departs from that fallback - `path.style.access` falls back to `false` in
 `ConfigExtractor` while Gluten wants `true`, `connection.maximum` to `25` while Gluten wants `15`, and
-`retry.limit` has no native fallback at all — which makes Gluten's value the one native sees on both
+`retry.limit` has no native fallback at all - which makes Gluten's value the one native sees on both
 channels. The previous behavior, where the write path silently got a different default from the read
 path, was a latent inconsistency rather than a contract.
 
@@ -306,12 +318,12 @@ path, was a latent inconsistency rather than a contract.
 per stage when a new resource profile is applied, and JVM-side readers observe the rewritten
 values:
 
-- `spark.gluten.numTaskSlotsPerExecutor` — native reads it at backend init only (Velox io/spill
+- `spark.gluten.numTaskSlotsPerExecutor` - native reads it at backend init only (Velox io/spill
   thread sizing), and warns and falls back to 1 when the key is missing.
-- `spark.gluten.memory.offHeap.size.in.bytes` — no native reader (the key is declared in
+- `spark.gluten.memory.offHeap.size.in.bytes` - no native reader (the key is declared in
   `cpp/core/config/GlutenConfig.h` but read nowhere); the ClickHouse backend reads it JVM-side off
   the conf map. Not declared `passToNative()`.
-- `spark.gluten.memory.task.offHeap.size.in.bytes` — read on both sides, see the table above.
+- `spark.gluten.memory.task.offHeap.size.in.bytes` - read on both sides, see the table above.
 
 The first and last are declared `createOptional`, because the value cannot be derived without a
 SparkConf at hand and every candidate placeholder is one native would take literally: `-1` fails
@@ -340,7 +352,7 @@ initialization.
 
 The initialization points, in the order they run:
 
-1. `Component.confs()` — Gluten calls `ensureRegistered()` on every registered component's conf
+1. `Component.confs()` - Gluten calls `ensureRegistered()` on every registered component's conf
    objects right after component discovery, before any `onDriverStart` / `onExecutorStart`. This is
    the recommended hook, and the only one early enough for the backend channel. `VeloxBackend` and
    `CHBackend` declare `VeloxConfig` / `CHConfig` through it.
@@ -360,7 +372,13 @@ The initialization points, in the order they run:
   supersedes them, and an out-of-tree backend migrates by declaring its conf object through
   `Component.confs()`. Unlike the removed `Set[String]` hooks, a declaration can express
   per-channel delivery, defaults and value normalization.
-- `GlutenConfigUtil.mapByteConfValue` (superseded by `nativeTransform`).
+- `GlutenConfigUtil.mapByteConfValue` (superseded by declaring `bytesConf(unit)` at the conf's
+  definition, so the conversion happens through the entry's own value converter).
+- The `shuffleFileBufferSize` JNI argument of `LocalPartitionWriterJniWrapper`.
+  `spark.shuffle.file.buffer` is now declared with `passToNative()` and reaches native through the
+  runtime conf map, where `createPartitionWriter` reads it and converts KiB to bytes. Passing it as
+  a JNI argument used to hand native the KiB count as if it were a byte count, making the buffer
+  1024x smaller than native's own default.
 - `spark.gluten.velox.fs.s3a.retry.mode`, which had no native reader: native reads the retry mode
   from `spark.hadoop.fs.s3a.retry.mode`, and the gluten-namespaced key was orphaned when the S3
   config path moved to velox's `S3Config`.
@@ -377,13 +395,15 @@ The initialization points, in the order they run:
 ## Testing
 
 - `org.apache.gluten.config.NativeConfRegistrySuite` (gluten-core) covers the declaration API:
-  which channel each of the four methods delivers on, the declared default in parsed form and its
-  re-resolution per delivery, `nativeTransform` over both a user-set value and a resolved default,
-  Spark fallback resolution, and duplicate declaration.
+  which channel each of the four methods delivers on, the declared default in converted form and its
+  re-resolution per delivery, delivery through the conf's own value converter (a `transform` and a
+  `bytesConf(unit)`) over both a user-set value and a resolved default, Spark fallback resolution,
+  and duplicate declaration.
 - `org.apache.gluten.config.NativeConfPassingSuite` (gluten-substrait) covers the delivered
   result end to end: what `getNativeSessionConf` / `getNativeBackendConf` actually select,
-  including byte-string normalization, per-channel scoping, where the default comes from (Gluten's
-  own, Spark's declaration, or nowhere) and the keys that are delivered only when set.
+  including byte-conf unit handling, per-channel scoping, where the default comes from (Gluten's
+  own, Spark's declaration, or nowhere), the keys that are delivered only when set, and a declared
+  key winning over an overlapping prefix rule.
 - `org.apache.gluten.config.ShuffleCodecConfSuite` (gluten-substrait) covers the shuffle codec's
   fallback resolution and its reported origin.
 - `org.apache.gluten.component.ComponentSuite` (gluten-core) covers the `Component.confs()` hook:

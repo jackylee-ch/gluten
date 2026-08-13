@@ -498,10 +498,11 @@ object GlutenConfig extends ConfigRegistry {
     // registrations are in place before native confs are selected.
     GlutenCoreConfig.ensureRegistered()
 
-    // Spark SQL confs read by native. A key the user did not set is delivered with the default
-    // declared by Spark's own entry, resolved at delivery time - see
-    // `GlutenConfigUtil.resolveSparkDeclaredDefault`. Nothing is restated here, so no Gluten-side
-    // default can drift from Spark's across versions.
+    // Spark SQL confs read by native. All of these rely on native's own fallback matching Spark's
+    // default, so nothing is delivered when the key is unset - see `ConfigBuilder.passToNative`.
+    // `spark.sql.legacy.sizeOfNull` is `passToNative()` for documentation purposes only: it is
+    // never read from the conf map, since the value is baked as a substrait literal at plan
+    // conversion (see `ExpressionConverter`).
     registerConf(SQLConf.LEGACY_SIZE_OF_NULL.key).stringConf.passToNative().createOptional
     registerConf(SQLConf.JSON_GENERATOR_IGNORE_NULL_FIELDS.key)
       .stringConf
@@ -525,10 +526,11 @@ object GlutenConfig extends ConfigRegistry {
       .createOptional
     registerConf(SPARK_IO_COMPRESSION_CODEC).stringConf.passToNative().createOptional
     // Velox compares the value against upper-cased literals; ClickHouse lower-cases it itself.
+    // Declaring `transform(toUpperCase)` mirrors Spark's own entry which also upper-cases.
     registerConf(SQLConf.LEGACY_TIME_PARSER_POLICY.key)
       .stringConf
+      .transform(_.toUpperCase(Locale.ROOT))
       .passToNative()
-      .nativeTransform(_.toUpperCase(Locale.ROOT))
       .createOptional
     registerConf(SQLConf.CASE_SENSITIVE.key).stringConf.passToNative().createOptional
     registerConf(SQLConf.IGNORE_MISSING_FILES.key).stringConf.passToNative().createOptional
@@ -540,37 +542,47 @@ object GlutenConfig extends ConfigRegistry {
       .stringConf
       .passToNative()
       .createOptional
-    registerConf(SQLConf.MAP_KEY_DEDUP_POLICY.key).stringConf.passToNative().createOptional
-    registerConf(SQLConf.ANSI_ENABLED.key).stringConf.passToNative().createOptional
+    registerConf(SQLConf.MAP_KEY_DEDUP_POLICY.key)
+      .stringConf
+      .passToNative()
+      // Native reads an absent key as non-throwing, contradicting Spark's own default of EXCEPTION
+      // (throw on duplicate keys). Resolved from Spark's entry so a version change is picked up
+      // automatically, rather than restating "EXCEPTION" here.
+      .createWithForeignDefault
+    // Spark's default flipped from false (up to 3.5) to true (4.0+), and is itself read from a
+    // system property rather than a fixed literal, so restating it here would drift either way.
+    // Native's own fallback ("false") is wrong for Spark 4.0+, hence resolving from Spark's entry.
+    registerConf(SQLConf.ANSI_ENABLED.key).stringConf.passToNative().createWithForeignDefault
     // Spark's default here is the current JVM default time zone, so it must be resolved per
     // delivery rather than once at declaration - a session, or a test, may change it in between.
-    registerConf(SQLConf.SESSION_LOCAL_TIMEZONE.key).stringConf.passToNative().createOptional
+    // Native's own fallback (absent key) has no notion of a time zone at all.
+    registerConf(SQLConf.SESSION_LOCAL_TIMEZONE.key)
+      .stringConf
+      .passToNative()
+      .createWithForeignDefault
 
-    // Spark core confs. Size strings (e.g. "64k") are normalized to numbers in bytes for native,
-    // which also applies to the default resolved from Spark - `spark.shuffle.file.buffer` defaults
-    // to the string "32k".
+    // Spark core confs. Size confs are declared with `bytesConf` matching Spark's own declaration,
+    // so the value reaches native in the same unit Spark reads it in; native applies any further
+    // conversion it needs (e.g. *1024 for `spark.shuffle.file.buffer` which is KiB).
     registerConf(SPARK_SHUFFLE_SPILL_COMPRESS).booleanConf.passToNative().createOptional
     registerConf(SPARK_REDACTION_REGEX).stringConf.passToNative().createOptional
     registerConf(SPARK_UNSAFE_SORTER_SPILL_READER_BUFFER_SIZE)
-      .stringConf
+      .bytesConf(ByteUnit.BYTE)
       .passToNative()
-      .nativeTransform(v => JavaUtils.byteStringAs(v, ByteUnit.BYTE).toString)
       .createOptional
     registerConf(SPARK_SHUFFLE_SPILL_DISK_WRITE_BUFFER_SIZE)
-      .stringConf
+      .bytesConf(ByteUnit.BYTE)
       .passToNative()
-      .nativeTransform(v => JavaUtils.byteStringAs(v, ByteUnit.BYTE).toString)
       .createOptional
     registerConf(SPARK_SHUFFLE_FILE_BUFFER)
-      .stringConf
+      .bytesConf(ByteUnit.KiB)
       .passToNative()
-      .nativeTransform(v => (JavaUtils.byteStringAs(v, ByteUnit.KiB) * 1024).toString)
       .createOptional
 
-    // Hadoop-owned S3/GCS keys. No Spark entry declares them, so nothing is resolved for an unset
-    // key and native's own fallback applies - which is what the credential keys need, since native
-    // branches on whether they are present at all. In backend scope they are also covered by the
-    // `spark.hadoop.fs.s3a.` / `spark.hadoop.fs.gs.` prefix rules.
+    // Hadoop-owned S3/GCS keys. No Spark entry declares them, and native branches on whether they
+    // are present at all - a credential key that is absent tells native no credentials were
+    // configured, so nothing may be delivered for an unset one. In backend scope they are also
+    // covered by the `spark.hadoop.fs.s3a.` / `spark.hadoop.fs.gs.` prefix rules.
     registerConf(SPARK_S3_ACCESS_KEY).stringConf.passToNative().createOptional
     registerConf(SPARK_S3_SECRET_KEY).stringConf.passToNative().createOptional
     registerConf(SPARK_S3_ENDPOINT).stringConf.passToNative().createOptional
@@ -623,7 +635,11 @@ object GlutenConfig extends ConfigRegistry {
           // put in all gluten velox configs
           k.startsWith(confPrefixSession)
       }
-      .foreach { case (k, v) => nativeConfMap.put(k, v) }
+      // A key already selected from the registry keeps that value: the declaration is the more
+      // specific statement, and it is the only one that parses the value through the conf's own
+      // converter. Overwriting here would silently deliver the raw string for a declared key that a
+      // prefix rule also matches.
+      .foreach { case (k, v) => nativeConfMap.getOrElseUpdate(k, v) }
 
     // When `orc.force.positional.evolution=true`, vanilla Spark maps ORC columns by
     // position rather than by name (see OrcUtils.requestedColumnIds). Forward the flag to
@@ -680,7 +696,9 @@ object GlutenConfig extends ConfigRegistry {
           k.startsWith(confPrefix) || k.startsWith(s3Prefix) || k.startsWith(azurePrefix) || k
             .startsWith(gsPrefix) || k.startsWith(backendPrefix)
       }
-      .foreach { case (k, v) => nativeConfMap.put(k, v) }
+      // As in getNativeSessionConf: a registry-selected key wins over a prefix match, so a declared
+      // key's value converter is not bypassed by the raw prefix value.
+      .foreach { case (k, v) => nativeConfMap.getOrElseUpdate(k, v) }
 
     // return
     nativeConfMap.asJava
