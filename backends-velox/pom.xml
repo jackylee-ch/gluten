@@ -84,12 +84,17 @@
       ${arrow.deps.scope} is `provided` (Spark 4.x), gluten-arrow's Arrow
       dependencies do not reach this module's compile classpath on their own.
       Under `compile` (Spark 3.x) these are redundant but harmless.
+
+      The allocator implementation (${arrow-memory.artifact}) is the exception:
+      it is never compiled against, only discovered on the classpath at runtime,
+      so it uses ${arrow-memory.scope} (runtime on Spark 3.x, provided on 4.x)
+      rather than ${arrow.deps.scope}.
     -->
     <dependency>
       <groupId>org.apache.arrow</groupId>
       <artifactId>${arrow-memory.artifact}</artifactId>
       <version>${arrow.version}</version>
-      <scope>${arrow.deps.scope}</scope>
+      <scope>${arrow-memory.scope}</scope>
       <exclusions>
         <exclusion>
           <groupId>io.netty</groupId>

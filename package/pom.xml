@@ -350,6 +350,7 @@
               <executable>${project.basedir}/../dev/check-arrow-c-shading.sh</executable>
               <arguments>
                 <argument>${project.build.directory}/${project.build.finalName}.jar</argument>
+                <argument>${gluten.shade.packageName}</argument>
               </arguments>
             </configuration>
           </execution>

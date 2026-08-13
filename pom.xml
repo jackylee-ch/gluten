@@ -91,6 +91,15 @@
     -->
     <arrow.deps.scope>compile</arrow.deps.scope>
     <!--
+      Scope of the Arrow allocator *implementation* (${arrow-memory.artifact}).
+      Gluten never compiles against it — `CheckAllocator` discovers it by
+      scanning the classpath at runtime — so it stays out of the compile scope
+      and off downstream modules' compile classpaths. `runtime` still lands it
+      in the shaded bundle; Spark 4.x overrides this with `provided` so Spark's
+      own allocator is used instead.
+    -->
+    <arrow-memory.scope>runtime</arrow-memory.scope>
+    <!--
       groupId used in the Arrow <exclusion>s on the Spark dependencies below.
       Set to `org.apache.arrow` (the real groupId) the exclusions apply, so
       gluten's own bundled Arrow wins. Profiles that use `provided` Arrow
@@ -1319,6 +1328,7 @@
         <commons-lang3.version>3.17.0</commons-lang3.version>
         <arrow.version>18.1.0</arrow.version>
         <arrow.deps.scope>provided</arrow.deps.scope>
+        <arrow-memory.scope>provided</arrow-memory.scope>
         <!-- Matches no groupId: let Spark's own Arrow through. -->
         <spark.arrow.exclusion.groupId>none</spark.arrow.exclusion.groupId>
         <scala.compiler.version>4.9.2</scala.compiler.version>
@@ -1401,6 +1411,7 @@
         <commons-lang3.version>3.17.0</commons-lang3.version>
         <arrow.version>18.3.0</arrow.version>
         <arrow.deps.scope>provided</arrow.deps.scope>
+        <arrow-memory.scope>provided</arrow-memory.scope>
         <!-- Matches no groupId: let Spark's own Arrow through. -->
         <spark.arrow.exclusion.groupId>none</spark.arrow.exclusion.groupId>
         <scala.compiler.version>4.9.5</scala.compiler.version>
