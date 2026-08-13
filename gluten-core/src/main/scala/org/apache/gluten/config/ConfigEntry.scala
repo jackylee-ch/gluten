@@ -280,15 +280,15 @@ private[gluten] class ConfigEntryFallback[T](
 }
 
 /**
- * A config entry that falls back to a config owned by Spark rather than by Gluten, e.g. Gluten's
- * shuffle codec falling back to `spark.io.compression.codec`.
+ * A config entry that falls back to a config owned by a different owner (Spark, Hadoop, ...) rather
+ * than by Gluten, e.g. Gluten's shuffle codec falling back to `spark.io.compression.codec`.
  *
- * The fallback is stated by key and default value rather than as Spark's own `ConfigEntry`, which
- * is `private[spark]` and so cannot appear in a signature here. It is read through
+ * The fallback is stated by key and default value rather than as the foreign `ConfigEntry`, which
+ * for Spark is `private[spark]` and so cannot appear in a signature here. It is read through
  * [[GlutenConfigProvider]] so that both keys are looked up in the same conf source, and its default
  * value applies when neither key is set.
  */
-private[gluten] class ConfigEntrySparkFallback[T](
+private[gluten] class ConfigEntryForeignFallback[T](
     _key: String,
     _doc: String,
     _version: String,
@@ -319,16 +319,16 @@ private[gluten] class ConfigEntrySparkFallback[T](
 
   override def stringConverter: T => String = _stringConverter
 
-  /** The key of the Spark configuration this entry falls back to. */
+  /** The key of the foreign configuration this entry falls back to. */
   def fallbackKey: String = _fallbackKey
 
   override def readFrom(conf: GlutenConfigProvider): T = readWithSource(conf)._1
 
   /**
-   * Reads the value and tells whether it came from this entry's own key rather than from the Spark
-   * configuration it falls back to. A caller that treats the two differently - e.g. validating an
-   * explicitly set value against a stricter set of allowed values - should use this rather than
-   * looking the key up a second time, so the value and its origin cannot disagree.
+   * Reads the value and tells whether it came from this entry's own key rather than from the
+   * foreign configuration it falls back to. A caller that treats the two differently - e.g.
+   * validating an explicitly set value against a stricter set of allowed values - should use this
+   * rather than looking the key up a second time, so the value and its origin cannot disagree.
    */
   def readWithSource(conf: GlutenConfigProvider): (T, Boolean) = {
     readString(conf) match {

@@ -16,7 +16,7 @@
  */
 package org.apache.gluten.config
 
-import org.apache.spark.network.util.{ByteUnit, JavaUtils}
+import org.apache.spark.network.util.ByteUnit
 import org.apache.spark.sql.internal.MapProvider
 
 import org.scalatest.funsuite.AnyFunSuite
@@ -69,7 +69,7 @@ class NativeConfRegistrySuite extends AnyFunSuite {
     def declareDynamicDefault(key: String, defaultFunc: () => String): Unit =
       buildConf(key).passToNative().stringConf.createWithDefaultFunction(defaultFunc)
 
-    def declareSparkFallback(key: String): ConfigEntrySparkFallback[String] =
+    def declareForeignFallback(key: String): ConfigEntryForeignFallback[String] =
       registerConf(key)
         .stringConf
         .passToNative()
@@ -81,19 +81,29 @@ class NativeConfRegistrySuite extends AnyFunSuite {
     def declareTransform(key: String): Unit =
       registerConf(key)
         .stringConf
+        .transform(_.toUpperCase(Locale.ROOT))
         .passToNative()
-        .nativeTransform(_.toUpperCase(Locale.ROOT))
         .createOptional
 
-    def declareTransformWithDefault(key: String): Unit =
+    def declareTypedBytesWithDefault(key: String): Unit =
       registerConf(key)
-        .stringConf
+        .bytesConf(ByteUnit.KiB)
         .passToNative()
-        .nativeTransform(v => (JavaUtils.byteStringAs(v, ByteUnit.KiB) * 1024).toString)
         .createWithDefaultString("32k")
 
     def declareForeign(key: String): Unit =
       registerConf(key).stringConf.passToNative().createOptional
+
+    /**
+     * Foreign key declaring `createWithForeignDefault`: deliver the foreign-declared default per
+     * delivery.
+     */
+    def declareForeignWithOwnerDefault(key: String): Unit =
+      registerConf(key).stringConf.passToNative().createWithForeignDefault
+
+    /** A Gluten conf may not use createWithForeignDefault - it has no foreign declaration. */
+    def declareGlutenWithOwnerDefault(key: String): Unit =
+      buildConf(key).stringConf.passToNative().createWithForeignDefault
 
     def declareForeignWithoutPassToNative(key: String): Unit =
       registerConf(key).stringConf.createOptional
@@ -175,7 +185,7 @@ class NativeConfRegistrySuite extends AnyFunSuite {
     val key = "spark.gluten.test.native.withFallback.conf"
     val fallbackKey = "spark.gluten.test.native.fallbackTarget.conf"
     withRegisteredKeys(key) {
-      val entry = TestConfig.declareSparkFallback(key)
+      val entry = TestConfig.declareForeignFallback(key)
 
       // Neither key set: the Spark default applies.
       assert(entry.readWithSource(new MapProvider(Map.empty[String, String])) ===
@@ -193,16 +203,16 @@ class NativeConfRegistrySuite extends AnyFunSuite {
     }
   }
 
-  test("a Spark key backed by a fallback entry delivers nothing rather than a sentinel") {
-    // Spark renders an entry's default for display, not for consumption: `FallbackConfigEntry`
+  test("a foreign key backed by a fallback entry delivers nothing rather than a sentinel") {
+    // The owner renders an entry's default for display, not for consumption: `FallbackConfigEntry`
     // yields "<value of other.key>" and `OptionalConfigEntry` yields "<undefined>". Neither may
-    // reach native as a value - and for a key carrying a `nativeTransform`, parsing one would throw
-    // on every task. `spark.locality.wait.process` is `fallbackConf(LOCALITY_WAIT)` and
-    // `spark.driver.log.dfsDir` is `createOptional` in every supported Spark version.
+    // reach native as a value. `spark.locality.wait.process` is `fallbackConf(LOCALITY_WAIT)` and
+    // `spark.driver.log.dfsDir` is `createOptional` in every supported Spark version. Both are
+    // declared with `createWithForeignDefault` here to force the foreign-default resolution path.
     Seq("spark.locality.wait.process", "spark.driver.log.dfsDir").foreach {
       key =>
         withRegisteredKeys(key) {
-          TestConfig.declareForeign(key)
+          TestConfig.declareForeignWithOwnerDefault(key)
           val selected = selectRuntime(Map.empty[String, String], key)
           assert(
             selected.isEmpty,
@@ -214,22 +224,63 @@ class NativeConfRegistrySuite extends AnyFunSuite {
     }
   }
 
-  test("nativeTransform is applied to a user-set value and to a resolved default alike") {
-    val key = "spark.gluten.test.native.transform.conf"
+  test("createOptional on a foreign key delivers nothing even when the owner declares a default") {
+    // Even though `spark.sql.legacy.sizeOfNull` has an foreign-declared default of `true`,
+    // `createOptional` means "do not deliver anything when unset" - native's own fallback handles
+    // it.
+    val key = "spark.sql.legacy.sizeOfNull"
     withRegisteredKeys(key) {
-      TestConfig.declareTransform(key)
-      assert(selectRuntime(Map(key -> "legacy"), key) === Map(key -> "LEGACY"))
-      // No default declared, so nothing is delivered when unset.
+      TestConfig.declareForeign(key)
       assert(selectRuntime(Map.empty[String, String], key).isEmpty)
+      assert(selectRuntime(Map(key -> "false"), key) === Map(key -> "false"))
+    }
+  }
+
+  test("createWithForeignDefault delivers the foreign-declared default per delivery") {
+    // Uses `spark.sql.legacy.sizeOfNull` (foreign-declared default: "true", stable
+    // across supported Spark versions) to verify the foreign-default resolution path.
+    // Value is re-resolved each call, so a change to the foreign entry (or in the JVM
+    // state a dynamic default reads) would take effect immediately.
+    val key = "spark.sql.legacy.sizeOfNull"
+    withRegisteredKeys(key) {
+      TestConfig.declareForeignWithOwnerDefault(key)
+      assert(selectRuntime(Map.empty[String, String], key) === Map(key -> "true"))
+      // A user-set value overrides the foreign-declared default.
+      assert(selectRuntime(Map(key -> "false"), key) === Map(key -> "false"))
+    }
+  }
+
+  test("createWithForeignDefault on a Gluten-owned conf is rejected at declaration") {
+    val key = "spark.gluten.test.native.glutenOwnedWithOwnerDefault.conf"
+    withRegisteredKeys(key) {
+      assertThrows[IllegalArgumentException] {
+        TestConfig.declareGlutenWithOwnerDefault(key)
+      }
+    }
+  }
+
+  test("a user-set value is delivered through the conf's own value converter") {
+    val stringKey = "spark.gluten.test.native.transform.conf"
+    withRegisteredKeys(stringKey) {
+      // A conf declared with `.transform(toUpperCase)` upper-cases the user's value
+      // at delivery,
+      // through the entry's own converter, not through a separate transform pipeline.
+      TestConfig.declareTransform(stringKey)
+      assert(selectRuntime(Map(stringKey -> "legacy"), stringKey) === Map(stringKey -> "LEGACY"))
+      // No default declared, so nothing is delivered when unset.
+      assert(selectRuntime(Map.empty[String, String], stringKey).isEmpty)
     }
 
-    val sizeKey = "spark.gluten.test.native.transformWithDefault.conf"
+    val sizeKey = "spark.gluten.test.native.typedBytes.conf"
     withRegisteredKeys(sizeKey) {
-      // A declared default may be a raw string too - Spark's own default for
-      // `spark.shuffle.file.buffer` is "32k" - so the transform has to run over it as well.
-      TestConfig.declareTransformWithDefault(sizeKey)
-      assert(selectRuntime(Map.empty[String, String], sizeKey) === Map(sizeKey -> "32768"))
-      assert(selectRuntime(Map(sizeKey -> "64k"), sizeKey) === Map(sizeKey -> "65536"))
+      // A conf declared with `bytesConf(unit)` mirrors Spark's own bytes-conf semantics: the
+      // delivered value is in the declared unit (KiB here). A declared default may be a raw string
+      // ("32k"), which goes through the same converter as a user-set value.
+      TestConfig.declareTypedBytesWithDefault(sizeKey)
+      assert(selectRuntime(Map.empty[String, String], sizeKey) === Map(sizeKey -> "32"))
+      assert(selectRuntime(Map(sizeKey -> "64k"), sizeKey) === Map(sizeKey -> "64"))
+      // Bare numbers are interpreted in the declared unit, matching Spark's `byteStringAs`.
+      assert(selectRuntime(Map(sizeKey -> "128"), sizeKey) === Map(sizeKey -> "128"))
     }
   }
 

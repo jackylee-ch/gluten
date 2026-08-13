@@ -114,20 +114,23 @@ trait ConfigRegistry {
    *
    * Same contract as [[buildConf]]: modifiable at any time and usable at any time, delivered on
    * both channels. The difference is that nothing is registered as a Gluten config entry or to
-   * `SQLConf` - the owner already did that, and re-registering would conflict with it. Only the
-   * native delivery is declared, hence `passToNative` is required.
+   * `SQLConf` - the Spark/Hadoop already did that, and re-registering would conflict with it. Only
+   * the native delivery is declared, hence `passToNative` is required.
+   *
+   * The terminal method states what is delivered when the user did not set the key:
    *
    * {{{
-   *   registerConf(SPARK_S3_PATH_STYLE_ACCESS)
-   *     .doc("Read by the native S3 file system.")
-   *     .booleanConf
-   *     .passToNative()
-   *     .createWithDefault(true)
-   * }}}
+   *   // (A) native has a correct fallback (matches Spark's default or branches on absence).
+   *   registerConf(SQLConf.CASE_SENSITIVE.key).booleanConf.passToNative().createOptional
    *
-   * The default value declared here is the one passed to native side when the user did not set the
-   * configuration; it does not have to repeat, and is not checked against, the owner's own default.
-   * Declaring no default (`createOptional`) means the key is passed only when the user sets it.
+   *   // (B) native has no correct fallback; deliver Spark's own default, resolved per delivery so
+   *   // a dynamic or version-dependent default is not restated on the Gluten side.
+   *   registerConf(SQLConf.SESSION_LOCAL_TIMEZONE.key)
+   *     .stringConf.passToNative().createWithForeignDefault
+   *
+   *   // (C) Gluten deliberately departs from what both Spark and native would apply.
+   *   registerConf(SPARK_S3_PATH_STYLE_ACCESS).booleanConf.passToNative().createWithDefault(true)
+   * }}}
    */
   protected def registerConf(key: String): ConfigBuilder = {
     ConfigBuilder(key).markForeign()

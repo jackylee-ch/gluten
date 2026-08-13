@@ -16,11 +16,12 @@
  */
 package org.apache.gluten.config
 
+import org.apache.spark.network.util.ByteUnit
 import org.apache.spark.sql.internal.SQLConf
 
 import org.scalatest.funsuite.AnyFunSuiteLike
 
-import java.util.{Locale, TimeZone}
+import java.util.TimeZone
 
 import scala.collection.JavaConverters._
 
@@ -42,24 +43,25 @@ class NativeConfPassingSuite extends AnyFunSuiteLike {
     GlutenConfig.getNativeBackendConf(backendName, conf.toMap).asScala.toMap
   }
 
-  test("byte-string values are normalized to bytes for native") {
+  test("byte-string values are delivered in the conf's declared unit for native") {
     val selected = sessionConf(
       GlutenConfig.SPARK_SHUFFLE_FILE_BUFFER -> "32k",
       GlutenConfig.SPARK_UNSAFE_SORTER_SPILL_READER_BUFFER_SIZE -> "2m",
       GlutenConfig.SPARK_SHUFFLE_SPILL_DISK_WRITE_BUFFER_SIZE -> "1024"
     )
-    // spark.shuffle.file.buffer is a KiB-unit conf, delivered in bytes.
-    assert(selected(GlutenConfig.SPARK_SHUFFLE_FILE_BUFFER) === "32768")
+    // spark.shuffle.file.buffer is a KiB-unit conf, matching Spark's own declaration, so it is
+    // delivered as the KiB count; native multiplies by 1024 to get bytes.
+    assert(selected(GlutenConfig.SPARK_SHUFFLE_FILE_BUFFER) === "32")
+    // The other two are BYTE-unit confs, so they are delivered as byte counts.
     assert(selected(GlutenConfig.SPARK_UNSAFE_SORTER_SPILL_READER_BUFFER_SIZE) === "2097152")
     assert(selected(GlutenConfig.SPARK_SHUFFLE_SPILL_DISK_WRITE_BUFFER_SIZE) === "1024")
   }
 
-  test("an unset byte-string conf is normalized from Spark's own default too") {
+  test("an unset byte-string conf is not delivered when declared createOptional") {
     val selected = sessionConf()
-    // Spark declares "32k" for spark.shuffle.file.buffer, so the resolved default has to go through
-    // the same normalization as a user-set value would.
-    assert(selected(GlutenConfig.SPARK_SHUFFLE_FILE_BUFFER) === "32768")
-    assert(selected(GlutenConfig.SPARK_UNSAFE_SORTER_SPILL_READER_BUFFER_SIZE) === "1048576")
+    // `createOptional` means nothing is delivered when unset - native's own fallback applies.
+    assert(!selected.contains(GlutenConfig.SPARK_SHUFFLE_FILE_BUFFER))
+    assert(!selected.contains(GlutenConfig.SPARK_UNSAFE_SORTER_SPILL_READER_BUFFER_SIZE))
   }
 
   test("timeParserPolicy is upper-cased for native") {
@@ -68,11 +70,9 @@ class NativeConfPassingSuite extends AnyFunSuiteLike {
     // upper-casing on both channels is safe.
     assert(sessionConf(key -> "legacy")(key) === "LEGACY")
     assert(backendConf(key -> "legacy")(key) === "LEGACY")
-    // Spark's own default reaches native the same way. Read it from Spark's entry rather than
-    // restating it: it is EXCEPTION up to Spark 3.5 and CORRECTED from 4.0 on.
-    assert(
-      sessionConf()(key) ===
-        SQLConf.LEGACY_TIME_PARSER_POLICY.defaultValueString.toUpperCase(Locale.ROOT))
+    // Declared `createOptional`, so nothing is delivered when unset (native's fallback "" works
+    // because absent == non-LEGACY, which is what EXCEPTION semantics require).
+    assert(!sessionConf().contains(key))
   }
 
   test("a session-mutable foreign conf reaches both channels") {
@@ -110,18 +110,20 @@ class NativeConfPassingSuite extends AnyFunSuiteLike {
   }
 
   test("a Spark conf's default is taken from Spark's own declaration") {
-    // Read each expectation from Spark's own entry rather than restating it - a restated default is
-    // exactly the drift this mechanism removes, and several of these differ across Spark versions.
+    // `createOptional`: native's own fallback matches Spark's default, so nothing is delivered
+    // when unset.
     Seq(
       SQLConf.CASE_SENSITIVE,
-      SQLConf.MAP_KEY_DEDUP_POLICY,
-      SQLConf.ANSI_ENABLED,
       SQLConf.IGNORE_MISSING_FILES,
       SQLConf.LEGACY_STATISTICAL_AGGREGATE,
       SQLConf.DECIMAL_OPERATIONS_ALLOW_PREC_LOSS
-    ).foreach(e => assert(sessionConf()(e.key) === e.defaultValueString))
-    // A Spark core key resolves the same way, from `ConfigEntry.findEntry`.
-    assert(sessionConf()(GlutenConfig.SPARK_SHUFFLE_SPILL_COMPRESS) === "true")
+    ).foreach(e => assert(!sessionConf().contains(e.key)))
+    assert(!sessionConf().contains(GlutenConfig.SPARK_SHUFFLE_SPILL_COMPRESS))
+    // `createWithForeignDefault`: native's own fallback is wrong, so Spark's declared default is
+    // delivered, resolved from Spark's entry rather than restated - a restated default is exactly
+    // the drift this mechanism removes, and these two differ across Spark versions.
+    Seq(SQLConf.MAP_KEY_DEDUP_POLICY, SQLConf.ANSI_ENABLED)
+      .foreach(e => assert(sessionConf()(e.key) === e.defaultValueString))
     // A user-set value still wins.
     assert(sessionConf(SQLConf.CASE_SENSITIVE.key -> "true")(SQLConf.CASE_SENSITIVE.key) === "true")
   }
@@ -190,5 +192,28 @@ class NativeConfPassingSuite extends AnyFunSuiteLike {
     assert(sessionConf(sessionPrefixed -> "v2")(sessionPrefixed) === "v2")
     assert(backendConf(prefixed -> "v1")(prefixed) === "v1")
     assert(backendConf(sessionPrefixed -> "v2")(sessionPrefixed) === "v2")
+  }
+
+  test("a declared key wins over a prefix rule that also matches it") {
+    // A key can be both declared with `passToNative` and matched by a prefix rule. The registry
+    // selection runs first, so the prefix rule must not overwrite it - only the declaration applies
+    // the entry's value converter, and overwriting would silently deliver the raw value instead.
+    val key = s"${GlutenConfig.prefixSessionOf(backendName)}.declaredWithTransform"
+    try {
+      PrefixOverlapTestConfig.declare(key)
+      assert(sessionConf(key -> "64k")(key) === "65536")
+      assert(backendConf(key -> "64k")(key) === "65536")
+    } finally {
+      NativeConfRegistry.unregister(key)
+    }
+  }
+
+  /** Declares a conf whose key is matched by a prefix rule as well as by the registry. */
+  private object PrefixOverlapTestConfig extends ConfigRegistry {
+    def declare(key: String): Unit =
+      registerConf(key)
+        .bytesConf(ByteUnit.BYTE)
+        .passToNative()
+        .createOptional
   }
 }

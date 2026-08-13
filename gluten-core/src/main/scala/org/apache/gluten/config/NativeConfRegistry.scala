@@ -25,22 +25,29 @@ import scala.collection.JavaConverters._
  *
  * @param key
  *   the conf key.
+ * @param convert
+ *   normalizes a value for native side through the conf's own converter, i.e. the one chosen by
+ *   `stringConf` / `bytesConf(unit)` / `intConf` / ... plus any `transform`. Both a user-set value
+ *   and a resolved default flow through it, so a size conf reaches native as a number rather than
+ *   as "64k", and a `timeParserPolicy` conf reaches native upper-cased even when the user wrote it
+ *   in lower case.
  * @param declaredDefault
- *   the default declared by the conf's own entry, or `None` when it declares `createOptional`. Read
- *   per delivery rather than snapshotted here, since a default may be dynamic - see
- *   `TypedConfigBuilder.createWithDefaultFunction`. A Spark- or Hadoop-owned key usually declares
- *   no Gluten-side default and is then resolved from its owner instead, see
- *   `GlutenConfigUtil.resolveSparkDeclaredDefault`.
- * @param transform
- *   if defined, applied to the value before passing to native. Useful for value normalization, e.g.
- *   converting size strings like "64k" to byte numbers, or upper-casing. Applied to a resolved
- *   default the same way as to a user-set value, since a default may be a raw string too - Spark's
- *   own default for `spark.shuffle.file.buffer` is "32k".
+ *   the default to deliver when the user did not set the key, in its already-converted native form,
+ *   or `None` to deliver nothing (native's own fallback takes over). Evaluated per delivery rather
+ *   than snapshotted here, since a default may be dynamic - `spark.sql.session.timeZone` follows
+ *   the JVM default time zone, and `spark.sql.ansi.enabled` follows Spark's own default which
+ *   differs between 3.x and 4.x. Which path applies is determined at the declaration site:
+ *
+ *   - `createOptional`: `None` - nothing is delivered when unset.
+ *   - `createWithForeignDefault` (foreign only): resolved from the foreign entry via
+ *     `GlutenConfigUtil.resolveForeignDeclaredDefault` at each delivery, then run through
+ *     `convert`.
+ *   - `createWithDefault(value)`: the stated Gluten value in converted form.
  */
 case class NativeConfEntry(
     key: String,
-    declaredDefault: () => Option[String] = () => None,
-    transform: Option[String => String] = None)
+    convert: String => String = identity,
+    declaredDefault: () => Option[String] = () => None)
 
 /**
  * A registry for conf keys that should be passed to native side.
@@ -71,12 +78,15 @@ case class NativeConfEntry(
  *     (`buildConf` / `registerConf`) goes here *and* to the backend channel, so native observes the
  *     current value wherever it reads the key.
  *
- * A registered key that the user did not set is delivered with its declared default, resolved at
- * delivery time: the default declared here if the conf declares one, otherwise the one declared by
- * Spark for a Spark-owned key, via `GlutenConfigUtil.resolveSparkDeclaredDefault`. No conf states
- * "also pass my default"; a conf that genuinely has no default declares `createOptional` and is
- * then delivered only when set, which is how native's own fallback is left in charge.
+ * When the user did not set a registered key, what is delivered is stated at the declaration site
+ * (see `ConfigBuilder.passToNative`): `createOptional` delivers nothing and leaves native's own
+ * fallback in charge; `createWithForeignDefault` delivers the foreign-declared default resolved per
+ * delivery via `GlutenConfigUtil.resolveForeignDeclaredDefault`; `createWithDefault(value)`
+ * delivers the stated value. Delivery is always normalized through the conf's own value converter,
+ * so all per-key parsing lives at the declaration site rather than in per-key transforms at
+ * delivery.
  */
+
 object NativeConfRegistry extends Logging {
 
   private val runtimeEntries =
@@ -99,20 +109,21 @@ object NativeConfRegistry extends Logging {
    *   whether the conf is static to the native backend, i.e. declared by `buildStaticConf` /
    *   `registerStaticConf`. A static conf is delivered on the backend channel only; a modifiable
    *   one on both.
+   * @param convert
+   *   normalizes a value for native through the conf's own value converter, applied whether the
+   *   value comes from the user or from a resolved default.
    * @param declaredDefault
-   *   the default declared by the conf itself, evaluated per delivery so a dynamic default stays up
-   *   to date. `None` for a `createOptional` conf, which then falls back to the owner's declaration
-   *   for a Spark-owned key, or is delivered only when set.
-   * @param transform
-   *   if defined, applied to the value before passing, whether it comes from the user or from a
-   *   resolved default.
+   *   the default declared by the conf itself, in its already-converted native form, evaluated per
+   *   delivery so a dynamic default stays up to date. `None` for a `createOptional` conf, which
+   *   then falls back to the foreign declaration for a Spark-owned key, or is delivered only when
+   *   set.
    */
   private[config] def register(
       key: String,
       isStatic: Boolean,
-      declaredDefault: => Option[String] = None,
-      transform: Option[String => String] = None): Unit = {
-    val entry = NativeConfEntry(key, () => declaredDefault, transform)
+      convert: String => String = identity,
+      declaredDefault: => Option[String] = None): Unit = {
+    val entry = NativeConfEntry(key, convert, () => declaredDefault)
     if (!isStatic) {
       doRegister(runtimeEntries, entry)
     }
@@ -170,11 +181,11 @@ object NativeConfRegistry extends Logging {
       conf: scala.collection.Map[String, String]): Map[String, String] = {
     entries.values.flatMap {
       entry =>
-        // A key the user did not set falls back to its declared default, resolved now rather than
-        // snapshotted at declaration - a default may follow JVM or session state, e.g. Spark's
-        // default for `spark.sql.session.timeZone` is the current JVM default time zone.
-        val raw = conf.get(entry.key).orElse(entry.declaredDefault())
-        raw.map(v => entry.key -> entry.transform.map(_(v)).getOrElse(v))
+        // A user-set value goes through the conf's own converter so that e.g. "32k"
+        // reaches native as "32" (KiB), and "legacy" as "LEGACY". When unset, the
+        // declared default - already in converted form - is delivered instead.
+        conf.get(entry.key).map(v => entry.key -> entry.convert(v))
+          .orElse(entry.declaredDefault().map(d => entry.key -> d))
     }.toMap
   }
 
@@ -182,10 +193,5 @@ object NativeConfRegistry extends Logging {
   private[config] def unregister(key: String): Unit = {
     runtimeEntries.remove(key)
     backendEntries.remove(key)
-  }
-
-  /** Visible for testing: lets a suite re-declare after having exercised a backend delivery. */
-  private[config] def resetBackendDeliveredForTesting(): Unit = {
-    backendConfDelivered = false
   }
 }
