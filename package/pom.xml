@@ -351,6 +351,7 @@
               <arguments>
                 <argument>${project.build.directory}/${project.build.finalName}.jar</argument>
                 <argument>${gluten.shade.packageName}</argument>
+                <argument>${arrow.deps.scope}</argument>
               </arguments>
             </configuration>
           </execution>

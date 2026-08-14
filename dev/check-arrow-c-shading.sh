@@ -32,7 +32,8 @@
 #     classpath and the call site throws `ClassNotFoundException`.
 #
 # Usage:
-#   dev/check-arrow-c-shading.sh <path-to-gluten-velox-bundle.jar> [shade-package-name]
+#   dev/check-arrow-c-shading.sh <path-to-gluten-velox-bundle.jar> \
+#     [shade-package-name] [arrow-deps-scope]
 #
 # The shade package name defaults to org.apache.gluten.shaded and is passed by
 # package/pom.xml as ${gluten.shade.packageName}. Keep it parameterized: if this
@@ -40,14 +41,26 @@
 # checks below would silently match nothing and the whole guard would pass
 # vacuously.
 #
+# The arrow-deps-scope is the value of the Maven property ${arrow.deps.scope}
+# and drives the bundle-content assertion:
+#   - `compile`   (Spark 3.x): gluten ships its own Arrow inside the bundle, so
+#                              arrow-memory / arrow-vector classes MUST be
+#                              present (the bundle is self-contained).
+#   - `provided`  (Spark 4.x): Arrow is expected to come from the Spark
+#                              distribution at runtime, so those packages MUST
+#                              NOT be inside the bundle (otherwise the bundle
+#                              has silently regressed to shipping its own copy).
+# Any other value is not asserted against.
+#
 # Exit codes:
 #   0 — bundle is well-shaded (Arrow C-Data API uses public Apache Arrow API)
-#   1 — bundle is broken (Arrow C-Data references gluten-shaded types)
+#   1 — bundle is broken (Arrow C-Data references gluten-shaded types, OR
+#       Arrow content does not match the declared arrow-deps-scope)
 #   2 — usage / setup error
 
 set -euo pipefail
 
-JAR="${1:?usage: $0 <path-to-gluten-velox-bundle.jar> [shade-package-name]}"
+JAR="${1:?usage: $0 <path-to-gluten-velox-bundle.jar> [shade-package-name] [arrow-deps-scope]}"
 if [[ ! -f "$JAR" ]]; then
   echo "error: jar not found: $JAR" >&2
   exit 2
@@ -58,6 +71,7 @@ fi
 SHADE_PACKAGE="${2:-org.apache.gluten.shaded}"
 SHADE_DOTS_RE="${SHADE_PACKAGE//./\\.}"
 SHADE_SLASHES="${SHADE_PACKAGE//.//}"
+ARROW_DEPS_SCOPE="${3:-}"
 
 if ! command -v javap >/dev/null; then
   echo "error: javap not found on PATH" >&2
@@ -122,12 +136,55 @@ if compgen -G "$WORKDIR/all/org/apache/arrow/c/**/*.class" > /dev/null ||
   fi
 fi
 
+# Third check: the bundle's Arrow content must match ${arrow.deps.scope}.
+# This is the regression guard for #12737 — if any Arrow dependency ever slips
+# from `provided`/`runtime` back to `compile` on a Spark 4.x profile, the memory
+# and vector packages silently re-enter the bundle, undoing the size win and
+# re-introducing the Spark-vs-gluten Arrow version conflict. Assert directly on
+# the jar contents so the mistake fails the build instead of shipping.
+if [[ -n "$ARROW_DEPS_SCOPE" ]]; then
+  # arrow-memory-core / arrow-vector classes, excluding the always-bundled
+  # org.apache.arrow.c.* (arrow-c-data) which Spark never ships.
+  arrow_impl=$(unzip -l "$JAR" 2>/dev/null \
+    | grep -oE "org/apache/arrow/(memory|vector)/[^ ]*\.class" | sort -u || true)
+  impl_count=$(printf '%s' "$arrow_impl" | grep -c . || true)
+  case "$ARROW_DEPS_SCOPE" in
+    provided)
+      if [[ "$impl_count" -gt 0 ]]; then
+        echo "  FAIL bundle content — arrow.deps.scope=provided but the bundle"
+        echo "       still ships $impl_count arrow-memory/arrow-vector class(es):"
+        printf '%s\n' "$arrow_impl" | head -5 | sed 's/^/    /'
+        echo "    A dependency likely regressed to compile scope. Arrow must come"
+        echo "    from the Spark distribution at runtime on Spark 4.x."
+        failures=$((failures + 1))
+      else
+        echo "  OK   bundle carries no arrow-memory/arrow-vector (scope=provided)"
+      fi
+      ;;
+    compile)
+      if [[ "$impl_count" -eq 0 ]]; then
+        echo "  FAIL bundle content — arrow.deps.scope=compile but the bundle"
+        echo "       ships no arrow-memory/arrow-vector classes; the self-contained"
+        echo "       bundle is incomplete and will fail to allocate Arrow buffers."
+        failures=$((failures + 1))
+      else
+        echo "  OK   bundle carries arrow-memory/arrow-vector (scope=compile)"
+      fi
+      ;;
+    *)
+      echo "  SKIP bundle-content assertion (unrecognized arrow.deps.scope='$ARROW_DEPS_SCOPE')"
+      ;;
+  esac
+fi
+
 if (( failures > 0 )); then
   echo
-  echo "Bundle has $failures Arrow C-Data shading problem(s)."
-  echo "See gluten#12225 for context. Update package/pom.xml's"
+  echo "Bundle has $failures Arrow shading/content problem(s)."
+  echo "For shading failures, see gluten#12225 and update package/pom.xml's"
   echo "<relocation org.apache.arrow> excludes so every package reachable"
   echo "from org.apache.arrow.c stays unshaded (memory, vector, util)."
+  echo "For content failures, see gluten#12737 and check each Arrow"
+  echo "dependency's <scope> against \${arrow.deps.scope} for this profile."
   exit 1
 fi
 
