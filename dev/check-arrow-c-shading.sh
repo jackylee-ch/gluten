@@ -93,16 +93,24 @@ for cls in "${CLASSES[@]}"; do
   fi
 done
 
-# Second check: no org.apache.arrow.c.* class may *call* a shaded Arrow class.
-# Signatures alone miss org.apache.arrow.util.Preconditions & friends, which are
-# invoked from constructors but never appear in a descriptor.
+# Second check: no class under org/apache/arrow/c/ may *call* a shaded Arrow
+# class. Signatures alone miss org.apache.arrow.util.Preconditions & friends,
+# which are invoked from constructors but never appear in a descriptor.
+#
+# Both org.apache.arrow.c.* and org.apache.arrow.c.jni.* are excluded from
+# relocation in package/pom.xml, so both are scanned. The jni subpackage is
+# named explicitly rather than relying on `unzip` treating `c/*` as recursive —
+# that is implementation-defined, and the existence check below would otherwise
+# see an empty top level and skip the scan entirely.
 #
 # The name pattern covers every character legal in a JVM internal name after the
 # package prefix: identifier chars (letters, digits, `_`, `$`), `/` for nested
 # packages, and `-` for the synthetic `package-info` / `module-info` entries.
 mkdir -p "$WORKDIR/all"
-unzip -qo "$JAR" 'org/apache/arrow/c/*' -d "$WORKDIR/all" 2>/dev/null || true
-if compgen -G "$WORKDIR/all/org/apache/arrow/c/*.class" > /dev/null; then
+unzip -qo "$JAR" 'org/apache/arrow/c/*' 'org/apache/arrow/c/jni/*' \
+  -d "$WORKDIR/all" 2>/dev/null || true
+if compgen -G "$WORKDIR/all/org/apache/arrow/c/**/*.class" > /dev/null ||
+   compgen -G "$WORKDIR/all/org/apache/arrow/c/*.class" > /dev/null; then
   refs=$(grep -rahoE "${SHADE_SLASHES}/org/apache/arrow/[a-zA-Z0-9_$/-]+" \
     "$WORKDIR/all/org/apache/arrow/c" 2>/dev/null | sort -u || true)
   if [[ -n "$refs" ]]; then
