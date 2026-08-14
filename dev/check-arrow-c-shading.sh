@@ -90,11 +90,19 @@ CLASSES=(
 )
 
 failures=0
+# Track whether the bundle actually contains any org.apache.arrow.c.* class.
+# When it doesn't, this jar is not the velox bundle (e.g. the intermediate
+# jar-plugin output built without the data-lake profiles that would pull Arrow
+# into the shade artifactSet), and the bundle-content assertion below has
+# nothing to say about it. The two shading checks are already SKIP-safe in
+# that case; the content assertion has to be too.
+cdata_present=0
 for cls in "${CLASSES[@]}"; do
   if ! unzip -p "$JAR" "${cls}.class" > "$WORKDIR/$(basename "$cls").class" 2>/dev/null; then
     echo "  SKIP $cls (not in bundle)"
     continue
   fi
+  cdata_present=1
   signatures=$(javap -p "$WORKDIR/$(basename "$cls").class" 2>/dev/null || true)
   # Any method signature mentioning the shaded Arrow path is the bug.
   bad=$(echo "$signatures" | grep -E "${SHADE_DOTS_RE}\.org\.apache\.arrow\.(memory|vector)\." || true)
@@ -125,6 +133,7 @@ unzip -qo "$JAR" 'org/apache/arrow/c/*' 'org/apache/arrow/c/jni/*' \
   -d "$WORKDIR/all" 2>/dev/null || true
 if compgen -G "$WORKDIR/all/org/apache/arrow/c/**/*.class" > /dev/null ||
    compgen -G "$WORKDIR/all/org/apache/arrow/c/*.class" > /dev/null; then
+  cdata_present=1
   refs=$(grep -rahoE "${SHADE_SLASHES}/org/apache/arrow/[a-zA-Z0-9_$/-]+" \
     "$WORKDIR/all/org/apache/arrow/c" 2>/dev/null | sort -u || true)
   if [[ -n "$refs" ]]; then
@@ -142,7 +151,19 @@ fi
 # and vector packages silently re-enter the bundle, undoing the size win and
 # re-introducing the Spark-vs-gluten Arrow version conflict. Assert directly on
 # the jar contents so the mistake fails the build instead of shipping.
-if [[ -n "$ARROW_DEPS_SCOPE" ]]; then
+#
+# Gated on arrow-c-data being present. Whether Arrow lands in the jar at all is
+# a function of the dependency closure and the shade artifactSet, not just of
+# ${arrow.deps.scope}: `mvn install -Pspark-3.5 -Pbackends-velox` (no data-lake
+# profiles) produces an intermediate jar with no Arrow whatsoever. arrow-c-data
+# is bundled on every profile precisely because Spark never ships it, so its
+# presence is the reliable marker for "this is the velox bundle". Without that
+# gate, the `compile` branch below fires on jars that were never meant to carry
+# Arrow at all.
+if [[ -n "$ARROW_DEPS_SCOPE" && "$cdata_present" -eq 0 ]]; then
+  echo "  SKIP bundle-content assertion (no org.apache.arrow.c.* in jar —"
+  echo "       not a velox bundle, so its Arrow content is not asserted)"
+elif [[ -n "$ARROW_DEPS_SCOPE" ]]; then
   # arrow-memory-core / arrow-vector classes, excluding the always-bundled
   # org.apache.arrow.c.* (arrow-c-data) which Spark never ships.
   arrow_impl=$(unzip -l "$JAR" 2>/dev/null \
