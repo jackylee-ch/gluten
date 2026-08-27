@@ -17,7 +17,7 @@
 package org.apache.gluten.component
 
 import org.apache.gluten.backend.Backend
-import org.apache.gluten.config.{ConfigRegistry, NativeConfRegistry}
+import org.apache.gluten.config.{ConfigRegistry, GlutenCoreConfig, NativeConfRegistry}
 import org.apache.gluten.extension.injector.Injector
 
 import org.scalatest.BeforeAndAfterAll
@@ -212,10 +212,14 @@ class ComponentSuite extends AnyFunSuite with BeforeAndAfterAll {
 object ComponentSuite {
 
   /** A conf object declaring nothing, used where touching it must have no side effect. */
-  private object EmptyComponentConfig extends ConfigRegistry
+  private object EmptyComponentConfig extends ConfigRegistry {
+    override def get: GlutenCoreConfig = GlutenCoreConfig.get
+  }
 
   /** A conf object as a third-party component would declare one. */
   private object DummyComponentConfig extends ConfigRegistry {
+    override def get: GlutenCoreConfig = GlutenCoreConfig.get
+
     val DYNAMIC =
       buildConf("spark.gluten.test.component.dynamic.conf")
         .passToNative()

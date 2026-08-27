@@ -62,7 +62,7 @@ class GlutenCoreConfig(conf: SQLConf) extends Logging {
  * Make sure to run dev/gen-all-config-docs.sh after making changes to this file.
  */
 object GlutenCoreConfig extends ConfigRegistry {
-  override def get: GlutenCoreConfig = {
+  def get: GlutenCoreConfig = {
     new GlutenCoreConfig(activeSQLConf)
   }
 

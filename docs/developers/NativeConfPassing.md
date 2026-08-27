@@ -228,6 +228,8 @@ class AcmeComponent extends Component {
 }
 
 object AcmeConfig extends ConfigRegistry {
+  override def get: GlutenCoreConfig = GlutenCoreConfig.get
+
   val ACME_BATCH_SIZE =
     buildConf("spark.gluten.acme.batchSize").passToNative().intConf.createWithDefault(1024)
 

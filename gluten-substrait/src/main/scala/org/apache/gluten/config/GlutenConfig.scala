@@ -481,7 +481,7 @@ object GlutenConfig extends ConfigRegistry {
   val SPARK_IO_COMPRESSION_CODEC_DEFAULT = "lz4"
   val SPARK_MAX_BROADCAST_TABLE_SIZE = "spark.sql.maxBroadcastTableSize"
 
-  override def get: GlutenConfig = {
+  def get: GlutenConfig = {
     new GlutenConfig(GlutenCoreConfig.activeSQLConf)
   }
 

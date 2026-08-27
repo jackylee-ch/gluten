@@ -57,7 +57,7 @@ object CHConfig extends ConfigRegistry {
   def startWithSettingsPrefix(key: String): Boolean = key.startsWith(RUNTIME_SETTINGS)
   def removeSettingsPrefix(key: String): String = key.substring(RUNTIME_SETTINGS.length + 1)
 
-  override def get: CHConfig = new CHConfig(SQLConf.get)
+  def get: CHConfig = new CHConfig(SQLConf.get)
 
   val ENABLE_ONEPIPELINE_MERGETREE_WRITE =
     buildConf(prefixOf("mergetree.write.pipeline"))

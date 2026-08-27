@@ -126,7 +126,7 @@ class VeloxConfig(conf: SQLConf) extends GlutenConfig(conf) {
 }
 
 object VeloxConfig extends ConfigRegistry {
-  override def get: VeloxConfig = {
+  def get: VeloxConfig = {
     new VeloxConfig(SQLConf.get)
   }
 

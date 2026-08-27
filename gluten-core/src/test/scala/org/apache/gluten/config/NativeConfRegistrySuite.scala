@@ -43,6 +43,8 @@ class NativeConfRegistrySuite extends AnyFunSuite {
 
   /** A conf object exercising the four declaration methods, as a module would declare them. */
   private object TestConfig extends ConfigRegistry {
+    override def get: GlutenCoreConfig = GlutenCoreConfig.get
+
     val MODIFIABLE = "spark.gluten.test.native.modifiable.conf"
     val STATIC = "spark.gluten.test.native.static.conf"
     val JVM_ONLY = "spark.gluten.test.native.jvmOnly.conf"
