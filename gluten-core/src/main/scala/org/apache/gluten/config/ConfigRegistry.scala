@@ -153,11 +153,8 @@ trait ConfigRegistry {
     ConfigBuilder(key).markForeign().markStatic()
   }
 
-  /**
-   * The typed accessor of this conf object. Conf objects that only declare configurations - e.g. a
-   * component contributing a few native confs - can leave it as is.
-   */
-  def get: GlutenCoreConfig = GlutenCoreConfig.get
+  /** The typed accessor of this conf object. */
+  def get: GlutenCoreConfig
 }
 
 object ConfigRegistry {

@@ -210,6 +210,8 @@ class NativeConfPassingSuite extends AnyFunSuiteLike {
 
   /** Declares a conf whose key is matched by a prefix rule as well as by the registry. */
   private object PrefixOverlapTestConfig extends ConfigRegistry {
+    override def get: GlutenCoreConfig = GlutenCoreConfig.get
+
     def declare(key: String): Unit =
       registerConf(key)
         .bytesConf(ByteUnit.BYTE)
