@@ -558,8 +558,9 @@ object GlutenConfig extends ConfigRegistry {
       .stringConf
       .passToNative()
       // Native reads an absent key as non-throwing, contradicting Spark's default of EXCEPTION
-      // (throw on duplicate keys).
-      .createWithDefaultFunction(() => SQLConf.get.getConf(SQLConf.MAP_KEY_DEDUP_POLICY))
+      // (throw on duplicate keys). `toString` because Spark 4.1 declares the entry as an enum
+      // (`MapKeyDedupPolicy.Value`) where 3.x declares it as a string; both render "EXCEPTION".
+      .createWithDefaultFunction(() => SQLConf.get.getConf(SQLConf.MAP_KEY_DEDUP_POLICY).toString)
     // Spark's default flipped from false (up to 3.5) to true (4.0+), and is itself read from a
     // system property rather than a fixed literal. Native's own fallback ("false") is wrong for
     // Spark 4.0+.
