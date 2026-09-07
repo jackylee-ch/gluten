@@ -95,7 +95,7 @@ class NativeConfPassingSuite extends AnyFunSuiteLike {
   }
 
   test("a static foreign conf reaches the backend channel only") {
-    val key = SQLConf.PARQUET_WRITE_LEGACY_FORMAT.key
+    val key = GlutenCoreConfig.SPARK_OFFHEAP_ENABLED_KEY
     assert(backendConf(key -> "true")(key) === "true")
     assert(!sessionConf(key -> "true").contains(key))
   }
@@ -172,20 +172,29 @@ class NativeConfPassingSuite extends AnyFunSuiteLike {
     assert(userSet(GlutenConfig.SPARK_S3_CONNECTION_SSL_ENABLED) === "true")
   }
 
-  test("a conf native reads only as a JNI argument is not delivered at all") {
-    // The shuffle codec, its backend and the shuffle-writer buffer size are resolved JVM-side and
-    // handed to native as `createPartitionWriter` arguments. Native declares
-    // `kShuffleCompressionCodec` / `kShuffleCompressionCodecBackend` but reads neither from the
-    // conf map, and the buffer-size key appears nowhere in native at all - so none of the three is
-    // declared `passToNative`, and setting them puts nothing into either map.
+  test("a conf native does not read off either channel is not delivered at all") {
+    // `passToNative()` states that native reads the key out of the conf map. These reach native
+    // some other way, so declaring them would put keys nothing reads into both maps:
+    //   - the shuffle codec, its backend and the shuffle-writer buffer size are resolved JVM-side
+    //     and handed over as `createPartitionWriter` arguments; native declares
+    //     `kShuffleCompressionCodec` / `kShuffleCompressionCodecBackend` but reads neither, and the
+    //     buffer-size key appears nowhere in native at all;
+    //   - the two parquet write confs are put into the datasource options explicitly by
+    //     `VeloxParquetWriterInjects.nativeConf`, which wins because `createDataSource` merges the
+    //     runtime conf map underneath with `insert`.
+    // `spark.sql.legacy.sizeOfNull` belongs here too, but it has no Gluten entry to name - it is
+    // baked into the substrait plan by `ExpressionConverter`.
     Seq(
       GlutenConfig.COLUMNAR_SHUFFLE_CODEC.key,
       GlutenConfig.COLUMNAR_SHUFFLE_CODEC_BACKEND.key,
-      GlutenConfig.SHUFFLE_WRITER_BUFFER_SIZE.key
+      GlutenConfig.SHUFFLE_WRITER_BUFFER_SIZE.key,
+      GlutenConfig.SPARK_SQL_PARQUET_COMPRESSION_CODEC,
+      SQLConf.PARQUET_WRITE_LEGACY_FORMAT.key,
+      SQLConf.LEGACY_SIZE_OF_NULL.key
     ).foreach {
       key =>
-        assert(!sessionConf(key -> "lz4").contains(key))
-        assert(!backendConf(key -> "lz4").contains(key))
+        assert(!sessionConf(key -> "lz4").contains(key), key)
+        assert(!backendConf(key -> "lz4").contains(key), key)
     }
   }
 

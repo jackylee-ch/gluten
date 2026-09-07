@@ -76,9 +76,14 @@ object GlutenCoreConfig extends ConfigRegistry {
   val SPARK_OFFHEAP_SIZE_KEY = "spark.memory.offHeap.size"
   val SPARK_OFFHEAP_ENABLED_KEY = "spark.memory.offHeap.enabled"
 
-  // A Spark key without a Gluten ConfigEntry, read while the native backend is initialized.
+  // A Spark key without a Gluten ConfigEntry. Delivered on the backend channel because the
+  // ClickHouse backend reads it back JVM-side out of that map - `CHTransformerApi` gates its
+  // `max_memory_usage` derivation on it - not because any native source reads the key. It appears
+  // in no `cpp/` or `cpp-ch/` source.
   registerStaticConf(SPARK_OFFHEAP_ENABLED_KEY)
-    .doc("Whether Spark off-heap memory is enabled, read by native backend initialization.")
+    .doc(
+      "Whether Spark off-heap memory is enabled. Delivered with the native backend conf so that " +
+        "`CHTransformerApi.postProcessNativeConfig` can read it back; no native read site exists.")
     .booleanConf
     .passToNative()
     .createOptional

@@ -508,8 +508,11 @@ object GlutenConfig extends ConfigRegistry {
     // `spark.sql.legacy.sizeOfNull` is deliberately absent: native never reads it from the conf
     // map, since the value is baked as a substrait literal at plan conversion (see
     // `ExpressionConverter`). Declaring it would deliver a key nothing reads.
-    // Read by `ConfigExtractor` as a bool with its own fallback of `true`, matching Spark's
-    // default. A string literal because not every supported Spark version has the entry.
+    // A string literal because only Spark 4.1+ declares the entry. Note native's fallback here is
+    // `true` (`ConfigExtractor.cc:279`) while Spark 4.1 declares the entry with a default of
+    // `false`, so an unset key diverges from vanilla Spark on 4.1. That divergence predates this
+    // change - base delivered this key only when set as well - and closing it would alter Parquet
+    // read results, so it is left alone here and tracked separately.
     registerConf("spark.sql.legacy.parquet.returnNullStructIfAllFieldsMissing")
       .booleanConf
       .passToNative()
@@ -635,15 +638,12 @@ object GlutenConfig extends ConfigRegistry {
     registerConf(SPARK_S3_RETRY_MAX_ATTEMPTS).intConf.passToNative().createWithDefault(20)
     registerConf(SPARK_S3_CONNECTION_MAXIMUM).intConf.passToNative().createWithDefault(15)
 
-    // Datasource confs read once during native backend initialization.
-    registerStaticConf(SPARK_SQL_PARQUET_COMPRESSION_CODEC)
-      .stringConf
-      .passToNative()
-      .createOptional
-    registerStaticConf(SQLConf.PARQUET_WRITE_LEGACY_FORMAT.key)
-      .booleanConf
-      .passToNative()
-      .createOptional
+    // `spark.sql.parquet.compression.codec` and `spark.sql.parquet.writeLegacyFormat` are
+    // deliberately absent. Native does read them - `VeloxWriterUtils.cc:56,70` - but never off
+    // either channel: `VeloxParquetWriterInjects.nativeConf` puts both into the datasource options
+    // explicitly, and `VeloxJniWrapper`'s `createDataSource` merges the runtime conf map underneath
+    // with `insert`, which does not overwrite. The substrait write path takes them from the write
+    // rel instead. `VeloxBackend::init` reads neither.
   }
 
   /** Get dynamic configs. */

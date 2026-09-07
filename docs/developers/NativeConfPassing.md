@@ -195,9 +195,12 @@ val COLUMNAR_SHUFFLE_CODEC =
     .doc(s"The codec used for columnar shuffle compression. Defaults to $SPARK_IO_COMPRESSION_CODEC.")
     .stringConf
     .transform(_.toLowerCase(Locale.ROOT))
-    .passToNative()
     .fallbackConf(SPARK_IO_COMPRESSION_CODEC, SPARK_IO_COMPRESSION_CODEC_DEFAULT)
 ```
+
+No `passToNative()` here: the resolved codec reaches native as a `createPartitionWriter` argument,
+not through the conf map. `fallbackConf` and `passToNative` are independent - a fallback conf that
+native *does* read from the map declares both.
 
 Reading the entry yields the Gluten value if set, else the Spark value if set, else Spark's
 default, so callers never write a `None` branch. The fallback is stated by key and default value
@@ -215,8 +218,12 @@ val (codec, isSetOnGlutenConf) = COLUMNAR_SHUFFLE_CODEC.readWithSource(provider)
 This is preferable to looking the key up a second time, because the value and its origin come from
 one read and cannot disagree.
 
-Note the fallback is a JVM-side notion: only a user-set value is delivered to native, which reads
-the Spark key itself when the Gluten one is absent.
+Note the fallback is a JVM-side notion. Native never sees `spark.gluten.sql.columnar.shuffle.codec`
+at all - it declares `kShuffleCompressionCodec` but reads it nowhere. It does read
+`spark.io.compression.codec`, as the fallback for the *spill* codec
+(`WholeStageResultIterator.cc:610`), which is why that key is declared on its own with the same
+`toLowerCase` converter: Velox's `stringToCompressionKind` looks the value up in a lower-case-keyed
+map and raises on a miss, whereas Spark lower-cases at its own read site.
 
 ### Adding native confs from a backend or a component
 
@@ -300,17 +307,27 @@ per conf:
 | `spark.gluten.sql.columnar.cudf` | one-time GPU environment initialization | per-query CPU/GPU offload decision. Enabling in-session without startup enablement will not initialize the GPU |
 | `spark.gluten.memory.task.offHeap.size.in.bytes` | CH external sort/aggregation thresholds | Velox partial-aggregation memory limits |
 | `spark.gluten.velox.awsSdkLogLevel`, `spark.gluten.velox.s3UseProxyFromEnv`, `spark.gluten.velox.s3PayloadSigningPolicy` | reused HiveConnector construction | re-read on each data source sink creation, see below |
-| `spark.sql.legacy.statisticalAggregate`, `spark.sql.decimalOperations.allowPrecisionLoss`, `spark.sql.legacy.timeParserPolicy` | expression/aggregate behavior fixed into reused backend structures | per-query expression evaluation |
+| `spark.sql.decimalOperations.allowPrecisionLoss`, `spark.sql.legacy.timeParserPolicy` | ClickHouse bakes them into its startup settings (`CHUtil.cpp`) | per-query expression evaluation |
+| `spark.sql.legacy.statisticalAggregate` | not read at backend init by either backend; it is on the backend channel only because it is modifiable | per-query aggregate evaluation (`WholeStageResultIterator.cc:668`) |
 | `spark.hadoop.fs.s3a.*` connection confs (ssl, path-style, retry attempts, connection maximum, ...) | reused HiveConnector construction | per-query file system access, see below |
 
 ### `createHiveConnectorConfig` runs on both channels
 
 Velox's `createHiveConnectorConfig` is not backend-init-only. Besides building the reused
 `HiveConnector` from the backend conf (`VeloxBackend::init`), it is called per write from the
-**runtime** conf map, with no backend fallback merged in - see `VeloxParquetDataSourceS3::initSink`
-and friends, and `IcebergWriter`. Any conf it reads must therefore be declared modifiable so it
-reaches the runtime channel too, which is why the three `spark.gluten.velox.*` S3 confs above are
-not static.
+**runtime** conf map. Whether the backend conf acts as a fallback there depends on the path: the
+Iceberg writer merges it underneath (`VeloxJniWrapper.cc:877-879`), while the data source sink path
+does not - `createDataSource` merges only `ctx->getConfMap()` into the datasource options
+(`VeloxJniWrapper.cc:535-537`), and `VeloxParquetDataSourceS3::initSink` builds the connector config
+from that. So a conf this function reads should be declared modifiable if the sink path has to honour
+a session value, which is why the three `spark.gluten.velox.*` S3 confs above are not static.
+
+The three file-handle-cache confs (`fileHandleCacheEnabled`, `numCacheFileHandles`,
+`fileHandleExpirationDurationMs`) are the deliberate exception: they are read-path options that this
+same function happens to set, they really are fixed at startup, and native's own fallbacks are
+`true` / `10000` / `600000` - identical to Gluten's declared defaults - so the sink path lands on the
+same values without them. Keeping them static is what makes `spark.conf.set` reject them, which is
+correct for a cache built once.
 
 No Spark entry declares the `spark.hadoop.fs.s3a.*` connection confs, so an unset one resolves to no
 default and native's own fallback applies. Three of them declare a Gluten-side default because
@@ -329,8 +346,11 @@ values:
 - `spark.gluten.numTaskSlotsPerExecutor` - native reads it at backend init only (Velox io/spill
   thread sizing), and warns and falls back to 1 when the key is missing.
 - `spark.gluten.memory.offHeap.size.in.bytes` - no native reader (the key is declared in
-  `cpp/core/config/GlutenConfig.h` but read nowhere); the ClickHouse backend reads it JVM-side off
-  the conf map. Not declared `passToNative()`.
+  `cpp/core/config/GlutenConfig.h` but read nowhere), yet still declared `passToNative()`: the
+  ClickHouse backend is the consumer and reads it JVM-side out of the *delivered* backend conf map,
+  in `CHTransformerApi.postProcessNativeConfig`. `spark.memory.offHeap.enabled` is declared for the
+  same reason. These two are the only keys whose delivery is justified by a JVM-side reader of the
+  delivered map rather than by a native read site.
 - `spark.gluten.memory.task.offHeap.size.in.bytes` - read on both sides, see the table above.
 
 The first and last are declared `createOptional`, because the value cannot be derived without a
@@ -395,6 +415,15 @@ The initialization points, in the order they run:
 - `spark.gluten.velox.fs.s3a.retry.mode`, which had no native reader: native reads the retry mode
   from `spark.hadoop.fs.s3a.retry.mode`, and the gluten-namespaced key was orphaned when the S3
   config path moved to velox's `S3Config`.
+- The delivery of six more keys native never reads off either channel. Base put all of them into the
+  conf maps; nothing consumed them there. `spark.gluten.sql.columnar.shuffle.codec`, its
+  `.codecBackend` and `spark.gluten.shuffleWriter.bufferSize` are resolved JVM-side and handed over as
+  `createPartitionWriter` arguments; `spark.sql.legacy.sizeOfNull` is baked into the substrait plan by
+  `ExpressionConverter`; `spark.sql.parquet.compression.codec` and
+  `spark.sql.parquet.writeLegacyFormat` are put into the datasource options explicitly by
+  `VeloxParquetWriterInjects.nativeConf`, which wins over the conf map because `createDataSource`
+  merges the map underneath with `insert`. Keeping `passToNative()` on a key nothing reads would make
+  the marker mean less than it says.
 - The hand-written fallback from `spark.gluten.sql.columnar.shuffle.codec` to
   `spark.io.compression.codec` in `GlutenShuffleUtils`, now expressed by `fallbackConf`.
 - The restating of Spark defaults on the Gluten side. The old "configs having default values" lists
