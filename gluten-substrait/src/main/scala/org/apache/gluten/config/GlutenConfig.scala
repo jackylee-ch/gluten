@@ -19,7 +19,7 @@ package org.apache.gluten.config
 import org.apache.gluten.shuffle.SupportsColumnarShuffle
 
 import org.apache.spark.network.util.{ByteUnit, JavaUtils}
-import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.internal.{GlutenConfigUtil, SQLConf}
 
 import org.apache.hadoop.security.UserGroupInformation
 
@@ -478,9 +478,11 @@ object GlutenConfig extends ConfigRegistry {
   val SPARK_UNSAFE_SORTER_SPILL_READER_BUFFER_SIZE = "spark.unsafe.sorter.spill.reader.buffer.size"
   val SPARK_SHUFFLE_SPILL_DISK_WRITE_BUFFER_SIZE = "spark.shuffle.spill.diskWriteBufferSize"
   val SPARK_SHUFFLE_SPILL_COMPRESS = "spark.shuffle.spill.compress"
-  // The codec `spark.gluten.sql.columnar.shuffle.codec` falls back to, and its Spark default.
+  // The codec `spark.gluten.sql.columnar.shuffle.codec` falls back to, and its Spark default. The
+  // default is read back from Spark's own entry rather than restated here - see
+  // `GlutenConfigUtil.sparkIoCompressionCodecDefault`.
   val SPARK_IO_COMPRESSION_CODEC = "spark.io.compression.codec"
-  val SPARK_IO_COMPRESSION_CODEC_DEFAULT = "lz4"
+  val SPARK_IO_COMPRESSION_CODEC_DEFAULT = GlutenConfigUtil.sparkIoCompressionCodecDefault
   val SPARK_MAX_BROADCAST_TABLE_SIZE = "spark.sql.maxBroadcastTableSize"
 
   def get: GlutenConfig = {

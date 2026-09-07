@@ -136,9 +136,6 @@ object GlutenCoreConfig extends ConfigRegistry {
       .bytesConf(ByteUnit.BYTE)
       .createOptional
 
-  // No `passToNative`: native declares `kSparkOffHeapMemory` but reads it nowhere. The ClickHouse
-  // backend does consume it, but JVM-side from the conf map through this entry, so it does not need
-  // the native channel.
   val COLUMNAR_OFFHEAP_SIZE_IN_BYTES =
     buildConf("spark.gluten.memory.offHeap.size.in.bytes")
       .internal()

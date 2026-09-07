@@ -41,4 +41,13 @@ object GlutenConfigUtil {
     val parsedConf = glutenConf.map { case (k, v) => (k, getConfString(provider, k, v)) }
     parsedConf ++ otherConf
   }
+
+  /**
+   * Spark's own default for `spark.io.compression.codec`, read back from Spark's entry rather than
+   * restated - a restated foreign default is exactly what drifts. It has to be read from this
+   * package because `ConfigEntry` and the entry itself are `private[spark]`, so a Gluten package
+   * cannot name them.
+   */
+  def sparkIoCompressionCodecDefault: String =
+    org.apache.spark.internal.config.IO_COMPRESSION_CODEC.defaultValueString
 }
