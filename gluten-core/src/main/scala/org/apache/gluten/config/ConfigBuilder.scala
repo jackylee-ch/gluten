@@ -199,10 +199,11 @@ private[gluten] case class ConfigBuilder(key: String) {
     case _: ConfigEntryFallback[_] | _: ConfigEntryForeignFallback[_] => None
     // `createWithDefault(value)` / `createWithDefaultFunction(f)`. Reading the parsed default
     // rather than the raw default string means a "64MB" bytes conf reaches native as "67108864";
-    // for the function form, reading it here is what re-evaluates `f` on every delivery.
-    case e if e.defaultValue.isDefined => e.defaultValue.map(_.toString)
-    // `createOptional`: nothing is delivered when the key is not set.
-    case _ => None
+    // for the function form, reading it here is what re-evaluates `f` on every delivery. Read
+    // exactly once: `f` is caller-supplied, so a guard that also reads it would run it twice.
+    // `createOptional` lands here too and yields `None` - an `OptionalConfigEntry` declares no
+    // default value, so nothing is delivered when the key is not set.
+    case e => e.defaultValue.map(_.toString)
   }
 
   def intConf: TypedConfigBuilder[Int] = {

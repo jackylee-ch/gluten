@@ -851,11 +851,21 @@ Java_org_apache_gluten_vectorized_LocalPartitionWriterJniWrapper_createPartition
   auto& conf = ctx->getConfMap();
   if (auto it = conf.find(kShuffleFileBufferSize); it != conf.end()) {
     try {
-      shuffleFileBufferSize = std::stoll(it->second) * 1024;
-    } catch (const std::exception&) {
+      auto kib = std::stoll(it->second);
+      // Scaling to bytes can overflow where parsing did not: `stoll` throws on a value outside
+      // int64_t, but the multiplication would be undefined behaviour rather than an exception, so
+      // it has to be range-checked before it happens. Reject a non-positive value too - it is an
+      // allocation size, and `Spill::openForRead` takes it as unsigned, where a negative becomes a
+      // huge prefetch size and a zero divides by zero in `MmapFileStream`.
+      GLUTEN_CHECK(
+          kib > 0 && kib <= std::numeric_limits<int64_t>::max() / 1024, "out of range for a KiB count: " + it->second);
+      shuffleFileBufferSize = kib * 1024;
+    } catch (const std::exception& e) {
       // A malformed value should not fail shuffle writer creation when a sane native default is at
       // hand. Without this, `JNI_METHOD_END` would turn it into a `GlutenException` and take the
       // query down over a buffer size.
+      LOG(WARNING) << "Ignoring invalid " << kShuffleFileBufferSize << " value '" << it->second << "' (" << e.what()
+                   << "), using " << kDefaultShuffleFileBufferSize << " bytes.";
       shuffleFileBufferSize = kDefaultShuffleFileBufferSize;
     }
   }
