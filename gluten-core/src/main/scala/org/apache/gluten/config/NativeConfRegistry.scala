@@ -39,10 +39,8 @@ import scala.collection.JavaConverters._
  *   differs between 3.x and 4.x. Which path applies is determined at the declaration site:
  *
  *   - `createOptional`: `None` - nothing is delivered when unset.
- *   - `createWithForeignDefault` (foreign only): resolved from the foreign entry via
- *     `GlutenConfigUtil.resolveForeignDeclaredDefault` at each delivery, then run through
- *     `convert`.
- *   - `createWithDefault(value)`: the stated Gluten value in converted form.
+ *   - `createWithDefault(value)`: the stated value in converted form.
+ *   - `createWithDefaultFunction(f)`: `f`'s current result in converted form.
  */
 case class NativeConfEntry(
     key: String,
@@ -80,11 +78,10 @@ case class NativeConfEntry(
  *
  * When the user did not set a registered key, what is delivered is stated at the declaration site
  * (see `ConfigBuilder.passToNative`): `createOptional` delivers nothing and leaves native's own
- * fallback in charge; `createWithForeignDefault` delivers the foreign-declared default resolved per
- * delivery via `GlutenConfigUtil.resolveForeignDeclaredDefault`; `createWithDefault(value)`
- * delivers the stated value. Delivery is always normalized through the conf's own value converter,
- * so all per-key parsing lives at the declaration site rather than in per-key transforms at
- * delivery.
+ * fallback in charge; `createWithDefault(value)` delivers the stated value; and
+ * `createWithDefaultFunction(f)` delivers `f`'s result, re-evaluated on every delivery. Delivery is
+ * always normalized through the conf's own value converter, so all per-key parsing lives at the
+ * declaration site rather than in per-key transforms at delivery.
  */
 
 object NativeConfRegistry extends Logging {

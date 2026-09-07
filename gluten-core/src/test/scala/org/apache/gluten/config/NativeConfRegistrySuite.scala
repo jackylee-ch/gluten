@@ -97,15 +97,12 @@ class NativeConfRegistrySuite extends AnyFunSuite {
       registerConf(key).stringConf.passToNative().createOptional
 
     /**
-     * Foreign key declaring `createWithForeignDefault`: deliver the foreign-declared default per
-     * delivery.
+     * Foreign key whose default is a function rather than a literal, as a key whose owner computes
+     * its default at runtime is declared - the owner's accessor is read back instead of restating
+     * the default on the Gluten side.
      */
-    def declareForeignWithOwnerDefault(key: String): Unit =
-      registerConf(key).stringConf.passToNative().createWithForeignDefault
-
-    /** A Gluten conf may not use createWithForeignDefault - it has no foreign declaration. */
-    def declareGlutenWithOwnerDefault(key: String): Unit =
-      buildConf(key).stringConf.passToNative().createWithForeignDefault
+    def declareForeignWithDefaultFunction(key: String, defaultFunc: () => String): Unit =
+      registerConf(key).stringConf.passToNative().createWithDefaultFunction(defaultFunc)
 
     def declareForeignWithoutPassToNative(key: String): Unit =
       registerConf(key).stringConf.createOptional
@@ -205,27 +202,6 @@ class NativeConfRegistrySuite extends AnyFunSuite {
     }
   }
 
-  test("a foreign key backed by a fallback entry delivers nothing rather than a sentinel") {
-    // The owner renders an entry's default for display, not for consumption: `FallbackConfigEntry`
-    // yields "<value of other.key>" and `OptionalConfigEntry` yields "<undefined>". Neither may
-    // reach native as a value. `spark.locality.wait.process` is `fallbackConf(LOCALITY_WAIT)` and
-    // `spark.driver.log.dfsDir` is `createOptional` in every supported Spark version. Both are
-    // declared with `createWithForeignDefault` here to force the foreign-default resolution path.
-    Seq("spark.locality.wait.process", "spark.driver.log.dfsDir").foreach {
-      key =>
-        withRegisteredKeys(key) {
-          TestConfig.declareForeignWithOwnerDefault(key)
-          val selected = selectRuntime(Map.empty[String, String], key)
-          assert(
-            selected.isEmpty,
-            s"$key must not be delivered, but got ${selected.get(key)}"
-          )
-          // A user-set value is still delivered.
-          assert(selectRuntime(Map(key -> "3s"), key) === Map(key -> "3s"))
-        }
-    }
-  }
-
   test("createOptional on a foreign key delivers nothing even when the owner declares a default") {
     // Even though `spark.sql.legacy.sizeOfNull` has an foreign-declared default of `true`,
     // `createOptional` means "do not deliver anything when unset" - native's own fallback handles
@@ -238,26 +214,19 @@ class NativeConfRegistrySuite extends AnyFunSuite {
     }
   }
 
-  test("createWithForeignDefault delivers the foreign-declared default per delivery") {
-    // Uses `spark.sql.legacy.sizeOfNull` (foreign-declared default: "true", stable
-    // across supported Spark versions) to verify the foreign-default resolution path.
-    // Value is re-resolved each call, so a change to the foreign entry (or in the JVM
-    // state a dynamic default reads) would take effect immediately.
-    val key = "spark.sql.legacy.sizeOfNull"
+  test("a foreign key's default function is re-resolved on each delivery") {
+    // How `spark.sql.session.timeZone` and `spark.sql.ansi.enabled` are declared: native's own
+    // fallback is wrong, so the owner's default is delivered - read back through the owner's
+    // accessor rather than restated here, and therefore re-read on every delivery.
+    val key = "spark.gluten.test.native.foreignDefaultFunction.conf"
     withRegisteredKeys(key) {
-      TestConfig.declareForeignWithOwnerDefault(key)
-      assert(selectRuntime(Map.empty[String, String], key) === Map(key -> "true"))
-      // A user-set value overrides the foreign-declared default.
-      assert(selectRuntime(Map(key -> "false"), key) === Map(key -> "false"))
-    }
-  }
-
-  test("createWithForeignDefault on a Gluten-owned conf is rejected at declaration") {
-    val key = "spark.gluten.test.native.glutenOwnedWithOwnerDefault.conf"
-    withRegisteredKeys(key) {
-      assertThrows[IllegalArgumentException] {
-        TestConfig.declareGlutenWithOwnerDefault(key)
-      }
+      var ownerDefault = "EXCEPTION"
+      TestConfig.declareForeignWithDefaultFunction(key, () => ownerDefault)
+      assert(selectRuntime(Map.empty[String, String], key) === Map(key -> "EXCEPTION"))
+      ownerDefault = "LAST_WIN"
+      assert(selectRuntime(Map.empty[String, String], key) === Map(key -> "LAST_WIN"))
+      // A user-set value overrides the owner's default.
+      assert(selectRuntime(Map(key -> "LAST_WIN"), key) === Map(key -> "LAST_WIN"))
     }
   }
 

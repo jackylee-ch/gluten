@@ -147,7 +147,10 @@ already registered them, and registering again conflicts with it. `registerConf`
 ```scala
 registerConf(SQLConf.CASE_SENSITIVE.key).booleanConf.passToNative().createOptional
 
-registerConf(SQLConf.SESSION_LOCAL_TIMEZONE.key).stringConf.passToNative().createWithForeignDefault
+registerConf(SQLConf.SESSION_LOCAL_TIMEZONE.key)
+  .stringConf
+  .passToNative()
+  .createWithDefaultFunction(() => SQLConf.get.sessionLocalTimeZone)
 
 registerConf(SPARK_S3_PATH_STYLE_ACCESS)
   .doc("Read by the native S3 file system.")
@@ -160,20 +163,20 @@ The terminal method states what is delivered when the user did not set the key:
 
 - `createOptional`: nothing is delivered. Native's own fallback applies. This is the common case -
   native usually declares the same fallback Spark/Hadoop does, or branches on the key being absent.
-- `createWithForeignDefault`: delivers the default Spark/Hadoop declares for the key,
-  resolved freshly at each delivery. Use it only when native's fallback is wrong or missing and the
-  foreign default is dynamic or version-dependent - `spark.sql.session.timeZone` follows the JVM
-  default time zone, and `spark.sql.ansi.enabled` flipped its default in Spark 4.0. Never restate
-  such a default on the Gluten side - that is exactly what drifts.
 - `createWithDefault(value)`: delivers Gluten's own chosen value. Use it only when Gluten
   deliberately departs from what both Spark/Hadoop and native would apply -
   `path.style.access` above differs from both Hadoop's `core-default.xml` and
   `ConfigExtractor`'s `false`.
+- `createWithDefaultFunction(f)`: delivers `f`'s result, re-evaluated on every delivery. Use it when
+  native's fallback is wrong or missing and the owner's default cannot be a literal - either because
+  it is computed at runtime (`spark.sql.session.timeZone` follows the JVM default time zone) or
+  because it changes across versions (`spark.sql.ansi.enabled` flipped its default in Spark 4.0).
+  Read it back through the owner's own accessor rather than restating it: a restated default is
+  exactly what drifts. The delivery sites already read the conf map from `SQLConf.get`
+  (`Runtime.scala`, `NativeMemoryManager.scala`), so reaching for it in `f` adds no new dependency.
 
-A Hadoop key that no Spark entry declares (`spark.hadoop.fs.s3a.access.key`, ...) resolves to no
-default under `createWithForeignDefault` either, so in practice it behaves identically to
-`createOptional` for such keys. Use `createOptional` for them - it is more explicit about the
-intent.
+For a Hadoop key that no Spark entry declares (`spark.hadoop.fs.s3a.access.key`, ...) there is no
+owner accessor to read back, so use `createOptional` unless Gluten wants a value of its own.
 
 `passToNative()` is mandatory for these: a foreign conf is not read on the JVM side, so declaring
 one without delivering it to native would have no effect at all.

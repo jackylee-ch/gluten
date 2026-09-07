@@ -506,8 +506,8 @@ object GlutenConfig extends ConfigRegistry {
     // never read from the conf map, since the value is baked as a substrait literal at plan
     // conversion (see `ExpressionConverter`).
     registerConf(SQLConf.LEGACY_SIZE_OF_NULL.key).stringConf.passToNative().createOptional
-    // Read by `ConfigExtractor` as a bool with its own fallback of `true`, matching Spark's default.
-    // Declared as a string literal because not every supported Spark version has the entry.
+    // Read by `ConfigExtractor` as a bool with its own fallback of `true`, matching Spark's
+    // default. A string literal because not every supported Spark version has the entry.
     registerConf("spark.sql.legacy.parquet.returnNullStructIfAllFieldsMissing")
       .booleanConf
       .passToNative()
@@ -550,24 +550,30 @@ object GlutenConfig extends ConfigRegistry {
       .stringConf
       .passToNative()
       .createOptional
+    // The three confs below declare a default function rather than a literal: native's own fallback
+    // is wrong for them, and restating Spark's default here is exactly what drifts. Reading it back
+    // through Spark's own accessor keeps the two in step, and is resolved per delivery - the same
+    // `SQLConf.get` the delivery site already reads the conf map from.
     registerConf(SQLConf.MAP_KEY_DEDUP_POLICY.key)
       .stringConf
       .passToNative()
-      // Native reads an absent key as non-throwing, contradicting Spark's own default of EXCEPTION
-      // (throw on duplicate keys). Resolved from Spark's entry so a version change is picked up
-      // automatically, rather than restating "EXCEPTION" here.
-      .createWithForeignDefault
+      // Native reads an absent key as non-throwing, contradicting Spark's default of EXCEPTION
+      // (throw on duplicate keys).
+      .createWithDefaultFunction(() => SQLConf.get.getConf(SQLConf.MAP_KEY_DEDUP_POLICY))
     // Spark's default flipped from false (up to 3.5) to true (4.0+), and is itself read from a
-    // system property rather than a fixed literal, so restating it here would drift either way.
-    // Native's own fallback ("false") is wrong for Spark 4.0+, hence resolving from Spark's entry.
-    registerConf(SQLConf.ANSI_ENABLED.key).stringConf.passToNative().createWithForeignDefault
+    // system property rather than a fixed literal. Native's own fallback ("false") is wrong for
+    // Spark 4.0+.
+    registerConf(SQLConf.ANSI_ENABLED.key)
+      .stringConf
+      .passToNative()
+      .createWithDefaultFunction(() => SQLConf.get.ansiEnabled.toString)
     // Spark's default here is the current JVM default time zone, so it must be resolved per
-    // delivery rather than once at declaration - a session, or a test, may change it in between.
-    // Native's own fallback (absent key) has no notion of a time zone at all.
+    // delivery - a session, or a test, may change it in between. Native's own fallback (absent key)
+    // has no notion of a time zone at all.
     registerConf(SQLConf.SESSION_LOCAL_TIMEZONE.key)
       .stringConf
       .passToNative()
-      .createWithForeignDefault
+      .createWithDefaultFunction(() => SQLConf.get.sessionLocalTimeZone)
 
     // Spark core confs. Size confs are declared with `bytesConf` matching Spark's own declaration,
     // so the value reaches native in the same unit Spark reads it in; native applies any further

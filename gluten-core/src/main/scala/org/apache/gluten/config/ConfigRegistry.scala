@@ -123,10 +123,12 @@ trait ConfigRegistry {
    *   // (A) native has a correct fallback (matches Spark's default or branches on absence).
    *   registerConf(SQLConf.CASE_SENSITIVE.key).booleanConf.passToNative().createOptional
    *
-   *   // (B) native has no correct fallback; deliver Spark's own default, resolved per delivery so
-   *   // a dynamic or version-dependent default is not restated on the Gluten side.
+   *   // (B) native has no correct fallback; deliver Spark's own default, read back through Spark's
+   *   // accessor so a dynamic or version-dependent default is not restated on the Gluten side.
    *   registerConf(SQLConf.SESSION_LOCAL_TIMEZONE.key)
-   *     .stringConf.passToNative().createWithForeignDefault
+   *     .stringConf
+   *     .passToNative()
+   *     .createWithDefaultFunction(() => SQLConf.get.sessionLocalTimeZone)
    *
    *   // (C) Gluten deliberately departs from what both Spark and native would apply.
    *   registerConf(SPARK_S3_PATH_STYLE_ACCESS).booleanConf.passToNative().createWithDefault(true)

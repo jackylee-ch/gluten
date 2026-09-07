@@ -17,7 +17,6 @@
 package org.apache.gluten.config
 
 import org.apache.spark.network.util.{ByteUnit, JavaUtils}
-import org.apache.spark.sql.internal.GlutenConfigUtil
 
 import java.util.concurrent.TimeUnit
 
@@ -39,7 +38,6 @@ private[gluten] case class ConfigBuilder(key: String) {
   private[config] var _isStatic = false
   private[config] var _passToNative = false
   private[config] var _isForeign = false
-  private[config] var _deliverForeignDefault = false
 
   def doc(s: String): ConfigBuilder = {
     _doc = s
@@ -102,22 +100,6 @@ private[gluten] case class ConfigBuilder(key: String) {
   }
 
   /**
-   * Marks this foreign config as delivering the default declared by Spark / Hadoop for the key,
-   * resolved freshly at each delivery. Set by `createWithForeignDefault`, which is only meaningful
-   * for a foreign config: a Gluten config states its default in `createWithDefault(value)` instead.
-   */
-  private[config] def markDeliverForeignDefault(): ConfigBuilder = {
-    require(
-      _isForeign,
-      s"Config $key: createWithForeignDefault is only valid for registerConf() / " +
-        s"registerStaticConf(), since a Gluten config has no Spark / Hadoop declaration to " +
-        s"resolve a default from. Use createWithDefault(value) instead."
-    )
-    _deliverForeignDefault = true
-    this
-  }
-
-  /**
    * Marks this config to be passed to native side. A value set by the user is always delivered;
    * what happens when it is not set is stated by the terminal method, which is the whole of the
    * rule:
@@ -125,16 +107,16 @@ private[gluten] case class ConfigBuilder(key: String) {
    *   - `createOptional`: nothing is delivered, leaving native's own fallback in charge. This is
    *     the common case for a foreign key, since native usually declares the same fallback Spark /
    *     Hadoop does, or branches on the key being absent at all.
-   *   - `createWithForeignDefault` (foreign only): the default Spark / Hadoop declares for the key
-   *     is delivered, resolved freshly at each delivery. Use it when native's fallback is wrong or
-   *     missing, and the foreign default is either computed at runtime
-   *     (`spark.sql.session.timeZone` follows the JVM default time zone) or has changed across
-   *     Spark versions (`spark.sql.ansi.enabled` flipped its default in 4.0). Never restate such a
-   *     default on the Gluten side - that is exactly what drifts.
    *   - `createWithDefault(value)`: the stated value is delivered. For a Gluten config this is its
    *     own default; for a foreign one it says Gluten deliberately departs from what both Spark /
    *     Hadoop and native would apply, e.g. `fs.s3a.path.style.access` where native falls back to
    *     `false` and Gluten wants `true`.
+   *   - `createWithDefaultFunction(f)`: `f` is evaluated at each delivery. Use it when the default
+   *     cannot be a literal - because it follows JVM or session state (`spark.sql.session.timeZone`
+   *     follows the JVM default time zone) or has changed across Spark versions
+   *     (`spark.sql.ansi.enabled` flipped its default in 4.0). For a foreign key, read it back
+   *     through the owner's own accessor rather than restating it: a restated default is exactly
+   *     what drifts.
    *
    * The config is registered to [[NativeConfRegistry]] on entry creation.
    *
@@ -205,24 +187,19 @@ private[gluten] case class ConfigBuilder(key: String) {
   /**
    * The default delivered to native for a key the user did not set, or `None` to deliver nothing
    * and leave native's own fallback in charge. Read per delivery rather than snapshotted, so a
-   * default that follows JVM or session state keeps delivering its current value.
+   * `createWithDefaultFunction` default that follows JVM or session state keeps delivering its
+   * current value.
    *
-   * Which of the three the caller gets is stated by the terminal method - see [[passToNative]].
+   * Which of the two the caller gets is stated by the terminal method - see [[passToNative]].
    */
   private def declaredDefault(entry: ConfigEntry[_]): Option[String] = entry match {
     // A fallback entry reports the *target* conf's default as its own, and the target is delivered
     // under its own key. Delivering it here would also contradict the user: with only the target
     // conf set, this key would carry the target's default rather than the value the user chose.
     case _: ConfigEntryFallback[_] | _: ConfigEntryForeignFallback[_] => None
-    // `createWithForeignDefault` on a foreign key: take the foreign declaration, resolved
-    // now rather than restated on the Gluten side, so the two cannot drift across
-    // versions. The foreign default is a raw string ("32k" for
-    // `spark.shuffle.file.buffer`), so it goes through this conf's own converter just
-    // as a user-set value does.
-    case e if _deliverForeignDefault =>
-      GlutenConfigUtil.resolveForeignDeclaredDefault(key).map(convertForNative(e, _))
-    // `createWithDefault(value)`. Reading the parsed default rather than the raw
-    // default string means e.g. a "64MB" bytes conf reaches native as "67108864".
+    // `createWithDefault(value)` / `createWithDefaultFunction(f)`. Reading the parsed default
+    // rather than the raw default string means a "64MB" bytes conf reaches native as "67108864";
+    // for the function form, reading it here is what re-evaluates `f` on every delivery.
     case e if e.defaultValue.isDefined => e.defaultValue.map(_.toString)
     // `createOptional`: nothing is delivered when the key is not set.
     case _ => None
@@ -391,17 +368,6 @@ private[gluten] class TypedConfigBuilder[T](
     parent._onCreate.foreach(_(entry))
     parent.registerToNative(entry)
     entry
-  }
-
-  /**
-   * Declares the config to deliver the default Spark / Hadoop declares for the key when the user
-   * did not set it, resolved freshly at each delivery. Only valid for a foreign config declared via
-   * `registerConf` / `registerStaticConf`, since a Gluten config has no separate owner to consult -
-   * it uses [[createWithDefault(default:T)*]] instead.
-   */
-  def createWithForeignDefault: OptionalConfigEntry[T] = {
-    parent.markDeliverForeignDefault()
-    createOptional
   }
 
   def createWithDefault(default: T): ConfigEntry[T] = {

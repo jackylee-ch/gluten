@@ -119,8 +119,8 @@ class NativeConfPassingSuite extends AnyFunSuiteLike {
       SQLConf.DECIMAL_OPERATIONS_ALLOW_PREC_LOSS
     ).foreach(e => assert(!sessionConf().contains(e.key)))
     assert(!sessionConf().contains(GlutenConfig.SPARK_SHUFFLE_SPILL_COMPRESS))
-    // `createWithForeignDefault`: native's own fallback is wrong, so Spark's declared default is
-    // delivered, resolved from Spark's entry rather than restated - a restated default is exactly
+    // `createWithDefaultFunction`: native's own fallback is wrong, so Spark's default is delivered,
+    // read back through Spark's own accessor rather than restated - a restated default is exactly
     // the drift this mechanism removes, and these two differ across Spark versions.
     Seq(SQLConf.MAP_KEY_DEDUP_POLICY, SQLConf.ANSI_ENABLED)
       .foreach(e => assert(sessionConf()(e.key) === e.defaultValueString))
