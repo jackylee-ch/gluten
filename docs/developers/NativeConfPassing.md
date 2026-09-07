@@ -101,7 +101,9 @@ There is no separate "normalize before delivery" step: `bytesConf(ByteUnit.KiB)`
 count Spark's own entry would yield (native applies any further unit conversion it needs, e.g.
 `spark.shuffle.file.buffer` is KiB on both sides and native multiplies by 1024), and
 `bytesConf(ByteUnit.BYTE)` yields a byte count directly. A foreign conf declares the same converter
-its owner declares, so JVM and native agree on the value's meaning.
+its owner declares, so JVM and native agree on the value's meaning. This matters for a plain boolean
+too: `booleanConf` renders the value as `true` / `false` where the user may have written `TRUE`, and
+ClickHouse compares some delivered keys against the literal `true` case-sensitively.
 
 The default is read per delivery rather than snapshotted at declaration, so an entry declared with
 `createWithDefaultFunction` keeps delivering its current value.
@@ -170,7 +172,8 @@ The terminal method states what is delivered when the user did not set the key:
 - `createWithDefaultFunction(f)`: delivers `f`'s result, re-evaluated on every delivery. Use it when
   native's fallback is wrong or missing and the owner's default cannot be a literal - either because
   it is computed at runtime (`spark.sql.session.timeZone` follows the JVM default time zone) or
-  because it changes across versions (`spark.sql.ansi.enabled` flipped its default in Spark 4.0).
+  because it changes across versions (`spark.sql.ansi.enabled` flipped its default in Spark 4.0, and
+  in 4.x derives it from the `SPARK_ANSI_SQL_MODE` environment variable).
   Read it back through the owner's own accessor rather than restating it: a restated default is
   exactly what drifts. The delivery sites already read the conf map from `SQLConf.get`
   (`Runtime.scala`, `NativeMemoryManager.scala`), so reaching for it in `f` adds no new dependency.

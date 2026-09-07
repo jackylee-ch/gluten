@@ -75,6 +75,19 @@ class NativeConfPassingSuite extends AnyFunSuiteLike {
     assert(!sessionConf().contains(key))
   }
 
+  test("a boolean foreign conf is normalized to true/false for native") {
+    val key = SQLConf.DECIMAL_OPERATIONS_ALLOW_PREC_LOSS.key
+    // Declaring the conf `booleanConf` - the converter Spark's own entry declares - is what
+    // normalizes the case. ClickHouse compares the delivered value against the literal "true" / "1"
+    // case-sensitively (`BackendInitializerUtil::toField`), so an unnormalized "TRUE" would read as
+    // `false` there while Spark reads it as `true`.
+    Seq("TRUE", "True", " true ").foreach(v => assert(sessionConf(key -> v)(key) === "true"))
+    assert(sessionConf(key -> "False")(key) === "false")
+    // A value Spark itself would reject is delivered unchanged rather than failing conf selection,
+    // which runs per task - Spark raises on it at its own read site, with its own message.
+    assert(sessionConf(key -> "yes")(key) === "yes")
+  }
+
   test("a session-mutable foreign conf reaches both channels") {
     val key = SQLConf.LEGACY_SIZE_OF_NULL.key
     assert(sessionConf(key -> "true")(key) === "true")

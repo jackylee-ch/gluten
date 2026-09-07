@@ -505,7 +505,7 @@ object GlutenConfig extends ConfigRegistry {
     // `spark.sql.legacy.sizeOfNull` is `passToNative()` for documentation purposes only: it is
     // never read from the conf map, since the value is baked as a substrait literal at plan
     // conversion (see `ExpressionConverter`).
-    registerConf(SQLConf.LEGACY_SIZE_OF_NULL.key).stringConf.passToNative().createOptional
+    registerConf(SQLConf.LEGACY_SIZE_OF_NULL.key).booleanConf.passToNative().createOptional
     // Read by `ConfigExtractor` as a bool with its own fallback of `true`, matching Spark's
     // default. A string literal because not every supported Spark version has the entry.
     registerConf("spark.sql.legacy.parquet.returnNullStructIfAllFieldsMissing")
@@ -513,23 +513,23 @@ object GlutenConfig extends ConfigRegistry {
       .passToNative()
       .createOptional
     registerConf(SQLConf.JSON_GENERATOR_IGNORE_NULL_FIELDS.key)
-      .stringConf
+      .booleanConf
       .passToNative()
       .createOptional
     registerConf(SQLConf.RUNTIME_BLOOM_FILTER_EXPECTED_NUM_ITEMS.key)
-      .stringConf
+      .longConf
       .passToNative()
       .createOptional
     registerConf(SQLConf.RUNTIME_BLOOM_FILTER_NUM_BITS.key)
-      .stringConf
+      .longConf
       .passToNative()
       .createOptional
     registerConf(SQLConf.RUNTIME_BLOOM_FILTER_MAX_NUM_BITS.key)
-      .stringConf
+      .longConf
       .passToNative()
       .createOptional
     registerConf(SQLConf.RUNTIME_BLOOM_FILTER_MAX_NUM_ITEMS.key)
-      .stringConf
+      .longConf
       .passToNative()
       .createOptional
     registerConf(SPARK_IO_COMPRESSION_CODEC).stringConf.passToNative().createOptional
@@ -540,14 +540,17 @@ object GlutenConfig extends ConfigRegistry {
       .transform(_.toUpperCase(Locale.ROOT))
       .passToNative()
       .createOptional
-    registerConf(SQLConf.CASE_SENSITIVE.key).stringConf.passToNative().createOptional
-    registerConf(SQLConf.IGNORE_MISSING_FILES.key).stringConf.passToNative().createOptional
+    registerConf(SQLConf.CASE_SENSITIVE.key).booleanConf.passToNative().createOptional
+    registerConf(SQLConf.IGNORE_MISSING_FILES.key).booleanConf.passToNative().createOptional
     registerConf(SQLConf.LEGACY_STATISTICAL_AGGREGATE.key)
-      .stringConf
+      .booleanConf
       .passToNative()
       .createOptional
+    // ClickHouse compares this one against the literal "true" / "1" case-sensitively
+    // (`BackendInitializerUtil::toField`), so an unnormalized "TRUE" would silently turn precision
+    // loss off. `booleanConf` renders it as "true".
     registerConf(SQLConf.DECIMAL_OPERATIONS_ALLOW_PREC_LOSS.key)
-      .stringConf
+      .booleanConf
       .passToNative()
       .createOptional
     // The three confs below declare a default function rather than a literal: native's own fallback
@@ -561,13 +564,13 @@ object GlutenConfig extends ConfigRegistry {
       // (throw on duplicate keys). `toString` because Spark 4.1 declares the entry as an enum
       // (`MapKeyDedupPolicy.Value`) where 3.x declares it as a string; both render "EXCEPTION".
       .createWithDefaultFunction(() => SQLConf.get.getConf(SQLConf.MAP_KEY_DEDUP_POLICY).toString)
-    // Spark's default flipped from false (up to 3.5) to true (4.0+), and is itself read from a
-    // system property rather than a fixed literal. Native's own fallback ("false") is wrong for
-    // Spark 4.0+.
+    // Spark's default flipped from false (up to 3.5) to true (4.0+), and in 4.x is not a literal at
+    // all - it is derived from the `SPARK_ANSI_SQL_MODE` environment variable. Native's own
+    // fallback ("false") is wrong for Spark 4.0+.
     registerConf(SQLConf.ANSI_ENABLED.key)
-      .stringConf
+      .booleanConf
       .passToNative()
-      .createWithDefaultFunction(() => SQLConf.get.ansiEnabled.toString)
+      .createWithDefaultFunction(() => SQLConf.get.ansiEnabled)
     // Spark's default here is the current JVM default time zone, so it must be resolved per
     // delivery - a session, or a test, may change it in between. Native's own fallback (absent key)
     // has no notion of a time zone at all.
@@ -604,7 +607,7 @@ object GlutenConfig extends ConfigRegistry {
     registerConf(SPARK_S3_IAM).stringConf.passToNative().createOptional
     registerConf(SPARK_S3_IAM_SESSION_NAME).stringConf.passToNative().createOptional
     registerConf(SPARK_S3_ENDPOINT_REGION).stringConf.passToNative().createOptional
-    registerConf(SPARK_S3_AWS_IMDS_ENABLED).stringConf.passToNative().createOptional
+    registerConf(SPARK_S3_AWS_IMDS_ENABLED).booleanConf.passToNative().createOptional
     registerConf(SPARK_GCS_STORAGE_ROOT_URL).stringConf.passToNative().createOptional
     registerConf(SPARK_GCS_AUTH_TYPE).stringConf.passToNative().createOptional
     registerConf(SPARK_GCS_AUTH_SERVICE_ACCOUNT_JSON_KEYFILE)
@@ -627,7 +630,7 @@ object GlutenConfig extends ConfigRegistry {
       .passToNative()
       .createOptional
     registerStaticConf(SQLConf.PARQUET_WRITE_LEGACY_FORMAT.key)
-      .stringConf
+      .booleanConf
       .passToNative()
       .createOptional
   }
