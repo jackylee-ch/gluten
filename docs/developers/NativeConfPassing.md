@@ -393,8 +393,10 @@ The initialization points, in the order they run:
 - The hand-written fallback from `spark.gluten.sql.columnar.shuffle.codec` to
   `spark.io.compression.codec` in `GlutenShuffleUtils`, now expressed by `fallbackConf`.
 - The restating of Spark defaults on the Gluten side. The old "configs having default values" lists
-  spelled out each Spark default next to its key; a Spark-owned conf now declares `createOptional` and
-  its default is resolved from Spark's own entry at delivery time, so the two cannot drift.
+  spelled out each Spark default next to its key. A Spark-owned conf now declares `createOptional`
+  wherever native's own fallback already matches its owner's default, so there is nothing left to
+  keep in step by hand; where native's fallback is wrong, `createWithDefaultFunction` reads the
+  value back through the owner's own accessor rather than restating it.
   `spark.gluten.numTaskSlotsPerExecutor` and `spark.gluten.saveDir` become `createOptional` in the
   process: their `-1` / `""` defaults were placeholders that native either rejects
   (`GLUTEN_CHECK(numTaskSlotsPerExecutor >= 0)`) or would take for a real value

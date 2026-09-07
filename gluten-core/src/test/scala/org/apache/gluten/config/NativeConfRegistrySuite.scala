@@ -203,7 +203,7 @@ class NativeConfRegistrySuite extends AnyFunSuite {
   }
 
   test("createOptional on a foreign key delivers nothing even when the owner declares a default") {
-    // Even though `spark.sql.legacy.sizeOfNull` has an foreign-declared default of `true`,
+    // Even though Spark's own `spark.sql.legacy.sizeOfNull` entry declares a default of `true`,
     // `createOptional` means "do not deliver anything when unset" - native's own fallback handles
     // it.
     val key = "spark.sql.legacy.sizeOfNull"
