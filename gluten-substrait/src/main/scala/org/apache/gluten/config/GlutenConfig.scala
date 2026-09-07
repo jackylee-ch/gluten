@@ -504,10 +504,10 @@ object GlutenConfig extends ConfigRegistry {
 
     // Spark SQL confs read by native. All of these rely on native's own fallback matching Spark's
     // default, so nothing is delivered when the key is unset - see `ConfigBuilder.passToNative`.
-    // `spark.sql.legacy.sizeOfNull` is `passToNative()` for documentation purposes only: it is
-    // never read from the conf map, since the value is baked as a substrait literal at plan
-    // conversion (see `ExpressionConverter`).
-    registerConf(SQLConf.LEGACY_SIZE_OF_NULL.key).booleanConf.passToNative().createOptional
+    //
+    // `spark.sql.legacy.sizeOfNull` is deliberately absent: native never reads it from the conf
+    // map, since the value is baked as a substrait literal at plan conversion (see
+    // `ExpressionConverter`). Declaring it would deliver a key nothing reads.
     // Read by `ConfigExtractor` as a bool with its own fallback of `true`, matching Spark's
     // default. A string literal because not every supported Spark version has the entry.
     registerConf("spark.sql.legacy.parquet.returnNullStructIfAllFieldsMissing")
@@ -534,7 +534,16 @@ object GlutenConfig extends ConfigRegistry {
       .longConf
       .passToNative()
       .createOptional
-    registerConf(SPARK_IO_COMPRESSION_CODEC).stringConf.passToNative().createOptional
+    // Lower-cased even though Spark's own entry declares no transform: Spark lower-cases at its
+    // read site (`CompressionCodec.createCodec`) whereas Velox does not - `stringToCompressionKind`
+    // looks the value up in a lower-case-keyed map and raises `VELOX_UNSUPPORTED` on a miss, so a
+    // user writing `ZSTD` would fail the spill path in `WholeStageResultIterator`. This also keeps
+    // the key in step with `COLUMNAR_SHUFFLE_CODEC`, which falls back to it via the same converter.
+    registerConf(SPARK_IO_COMPRESSION_CODEC)
+      .stringConf
+      .transform(_.toLowerCase(Locale.ROOT))
+      .passToNative()
+      .createOptional
     // Velox compares the value against upper-cased literals; ClickHouse lower-cases it itself.
     // Declaring `transform(toUpperCase)` mirrors Spark's own entry which also upper-cases.
     registerConf(SQLConf.LEGACY_TIME_PARSER_POLICY.key)
@@ -1155,6 +1164,11 @@ object GlutenConfig extends ConfigRegistry {
   // Gluten's shuffle codec falls back to Spark's `spark.io.compression.codec`, whose own default
   // (lz4) applies when neither is set. Set this one only to use a codec different from Spark's, in
   // particular when a codec backend such as QAT is enabled.
+  //
+  // No `passToNative` on either of the two: `GlutenShuffleUtils.getCompressionCodec` resolves them
+  // JVM-side and they reach native as `createPartitionWriter` arguments. Native declares
+  // `kShuffleCompressionCodec` / `kShuffleCompressionCodecBackend` but reads neither from the conf
+  // map, so declaring them would deliver keys nothing reads.
   val COLUMNAR_SHUFFLE_CODEC =
     buildConf("spark.gluten.sql.columnar.shuffle.codec")
       .doc(
@@ -1164,14 +1178,12 @@ object GlutenConfig extends ConfigRegistry {
           "the supported codecs are gzip and zstd.")
       .stringConf
       .transform(_.toLowerCase(Locale.ROOT))
-      .passToNative()
       .fallbackConf(SPARK_IO_COMPRESSION_CODEC, SPARK_IO_COMPRESSION_CODEC_DEFAULT)
 
   val COLUMNAR_SHUFFLE_CODEC_BACKEND =
     buildConf("spark.gluten.sql.columnar.shuffle.codecBackend")
       .stringConf
       .transform(_.toLowerCase(Locale.ROOT))
-      .passToNative()
       .createOptional
 
   val COLUMNAR_SHUFFLE_COMPRESSION_THRESHOLD =
@@ -1229,9 +1241,11 @@ object GlutenConfig extends ConfigRegistry {
       .createWithDefaultString("64MB")
 
   // if not set, use COLUMNAR_MAX_BATCH_SIZE instead
+  // No `passToNative`: `ColumnarShuffleWriter` and `CelebornColumnarShuffleWriter` read it JVM-side
+  // and hand it over as the `nativeBufferSize` JNI argument. The key string appears nowhere under
+  // `cpp/` or `cpp-ch/`.
   val SHUFFLE_WRITER_BUFFER_SIZE =
     buildConf("spark.gluten.shuffleWriter.bufferSize")
-      .passToNative()
       .intConf
       .checkValue(_ > 0, s"must be positive.")
       .createOptional

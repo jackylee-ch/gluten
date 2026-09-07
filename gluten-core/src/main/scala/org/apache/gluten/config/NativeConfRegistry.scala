@@ -148,9 +148,15 @@ object NativeConfRegistry extends Logging {
     require(existing.isEmpty, s"Native conf ${entry.key} already registered!")
   }
 
-  def isRuntimeKey(key: String): Boolean = runtimeEntries.contains(key)
+  /**
+   * Visible for testing. Production code never asks which channel a key is on - it asks for the
+   * channel's contents through `selectRuntimeConf` / `selectBackendConf`. `private[gluten]` rather
+   * than `private[config]` because `ComponentSuite` lives in `org.apache.gluten.component`.
+   */
+  private[gluten] def isRuntimeKey(key: String): Boolean = runtimeEntries.contains(key)
 
-  def isBackendKey(key: String): Boolean = backendEntries.contains(key)
+  /** Visible for testing. See [[isRuntimeKey]]. */
+  private[gluten] def isBackendKey(key: String): Boolean = backendEntries.contains(key)
 
   /**
    * Select runtime-scoped native confs from the given conf map. A key absent from `conf` is

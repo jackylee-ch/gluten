@@ -89,7 +89,7 @@ class NativeConfPassingSuite extends AnyFunSuiteLike {
   }
 
   test("a session-mutable foreign conf reaches both channels") {
-    val key = SQLConf.LEGACY_SIZE_OF_NULL.key
+    val key = SQLConf.CASE_SENSITIVE.key
     assert(sessionConf(key -> "true")(key) === "true")
     assert(backendConf(key -> "true")(key) === "true")
   }
@@ -172,12 +172,29 @@ class NativeConfPassingSuite extends AnyFunSuiteLike {
     assert(userSet(GlutenConfig.SPARK_S3_CONNECTION_SSL_ENABLED) === "true")
   }
 
-  test("the shuffle codec is delivered to native only when set by user") {
-    val glutenKey = GlutenConfig.COLUMNAR_SHUFFLE_CODEC.key
-    // The fallback to Spark's codec conf is a JVM-side notion: native gets the key only when the
-    // user set it, and reads `spark.io.compression.codec` itself otherwise.
-    assert(sessionConf(glutenKey -> "lz4")(glutenKey) === "lz4")
-    assert(!sessionConf().contains(glutenKey))
+  test("a conf native reads only as a JNI argument is not delivered at all") {
+    // The shuffle codec, its backend and the shuffle-writer buffer size are resolved JVM-side and
+    // handed to native as `createPartitionWriter` arguments. Native declares
+    // `kShuffleCompressionCodec` / `kShuffleCompressionCodecBackend` but reads neither from the
+    // conf map, and the buffer-size key appears nowhere in native at all - so none of the three is
+    // declared `passToNative`, and setting them puts nothing into either map.
+    Seq(
+      GlutenConfig.COLUMNAR_SHUFFLE_CODEC.key,
+      GlutenConfig.COLUMNAR_SHUFFLE_CODEC_BACKEND.key,
+      GlutenConfig.SHUFFLE_WRITER_BUFFER_SIZE.key
+    ).foreach {
+      key =>
+        assert(!sessionConf(key -> "lz4").contains(key))
+        assert(!backendConf(key -> "lz4").contains(key))
+    }
+  }
+
+  test("the Spark codec conf the shuffle codec falls back to is lower-cased for native") {
+    // Spark lower-cases at its read site rather than in its entry, but Velox does not: its
+    // `stringToCompressionKind` looks the value up in a lower-case-keyed map and raises on a miss.
+    val key = GlutenConfig.SPARK_IO_COMPRESSION_CODEC
+    assert(sessionConf(key -> "ZSTD")(key) === "zstd")
+    assert(!sessionConf().contains(key))
   }
 
   test("the session time zone default follows the JVM default time zone") {

@@ -361,13 +361,18 @@ initialization.
 The initialization points, in the order they run:
 
 1. `Component.confs()` - Gluten calls `ensureRegistered()` on every registered component's conf
-   objects right after component discovery, before any `onDriverStart` / `onExecutorStart`. This is
-   the recommended hook, and the only one early enough for the backend channel. `VeloxBackend` and
-   `CHBackend` declare `VeloxConfig` / `CHConfig` through it.
-2. Explicit calls for special cases: `GlutenConfig` calls `GlutenCoreConfig.ensureRegistered()`
-   before its own registrations, and `VeloxListenerApi.parseConf` / `CHListenerApi` call their
-   backend conf object's `ensureRegistered()` as a belt-and-braces measure for code paths that
-   reach native conf selection without going through component discovery (e.g. tests and tools).
+   objects right after component discovery, before any `onDriverStart` / `onExecutorStart`, so a
+   component's declarations are in place before its backend initializes native. This is the
+   recommended hook for a new component, because it is the only one that does not require the
+   component to know where its own native initialization happens. `VeloxBackend` and `CHBackend`
+   declare `VeloxConfig` / `CHConfig` through it.
+2. Explicit calls, kept as a belt-and-braces measure for code paths that reach native conf selection
+   without going through component discovery, e.g. tests and tools: `GlutenConfig` calls
+   `GlutenCoreConfig.ensureRegistered()` before its own registrations, and
+   `VeloxListenerApi.parseConf` / `CHListenerApi.initialize` call their backend conf object's
+   `ensureRegistered()`. For the two in-tree backends these are redundant with (1) - each backend's
+   own call still precedes its native initialization on its own - so a component that already
+   overrides `confs()` does not need one.
 
 ## What was removed
 
