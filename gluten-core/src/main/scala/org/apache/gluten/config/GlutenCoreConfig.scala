@@ -142,10 +142,16 @@ object GlutenCoreConfig extends ConfigRegistry {
   val COLUMNAR_OFFHEAP_SIZE_IN_BYTES =
     buildConf("spark.gluten.memory.offHeap.size.in.bytes")
       .internal()
+      .passToNative()
       .doc(
-        "Must provide default value since non-execution operations " +
-          "(e.g. org.apache.spark.sql.Dataset#summary) doesn't propagate configurations using " +
-          "org.apache.spark.sql.execution.SQLExecution#withSQLConfPropagated")
+        "Total off-heap memory, set by GlutenPlugin from the actual resource configuration. " +
+          "Native declares `kSparkOffHeapMemory` but reads it nowhere; the ClickHouse backend is " +
+          "the consumer, and it reads the key JVM-side out of the delivered backend conf map - " +
+          "`CHTransformerApi.postProcessNativeConfig` derives `max_memory_usage`, " +
+          "`max_bytes_before_external_group_by` and `max_bytes_in_join` from it - so it must be " +
+          "delivered even though no native read site exists. Must provide a default value since " +
+          "non-execution operations (e.g. org.apache.spark.sql.Dataset#summary) do not propagate " +
+          "configurations via org.apache.spark.sql.execution.SQLExecution#withSQLConfPropagated.")
       .bytesConf(ByteUnit.BYTE)
       .createWithDefaultString("0")
 
