@@ -64,6 +64,28 @@ class NativeConfPassingSuite extends AnyFunSuiteLike {
     assert(!selected.contains(GlutenConfig.SPARK_UNSAFE_SORTER_SPILL_READER_BUFFER_SIZE))
   }
 
+  test("mapKeyDedupPolicy is upper-cased for native") {
+    val key = SQLConf.MAP_KEY_DEDUP_POLICY.key
+    // Spark's own entry upper-cases, and native compares against the literal "EXCEPTION".
+    // Delivering the raw case would read as LAST_WIN there, dropping the duplicate-key error.
+    assert(sessionConf(key -> "exception")(key) === "EXCEPTION")
+    assert(sessionConf(key -> "last_win")(key) === "LAST_WIN")
+  }
+
+  test("a byte conf outside Spark's own bound is not delivered in parsed form") {
+    val key = GlutenConfig.SPARK_SHUFFLE_FILE_BUFFER
+    // Spark caps this one at MAX_ROUNDED_ARRAY_LENGTH / 1024 KiB, and the conf declares the same
+    // bound. A value past it fails the conf's own converter, so it is delivered unchanged rather
+    // than as a parsed KiB count - `createPartitionWriter` then rejects it and warns, instead of
+    // sizing a multi-gigabyte buffer. Same for a value Spark's parser cannot read at all.
+    val toobig = (GlutenConfig.SPARK_SHUFFLE_FILE_BUFFER_MAX_KIB + 1).toString
+    assert(sessionConf(key -> toobig)(key) === toobig)
+    assert(sessionConf(key -> "0")(key) === "0")
+    assert(sessionConf(key -> "1.5m")(key) === "1.5m")
+    // A value inside the bound still arrives as the KiB count.
+    assert(sessionConf(key -> "64k")(key) === "64")
+  }
+
   test("timeParserPolicy is upper-cased for native") {
     val key = SQLConf.LEGACY_TIME_PARSER_POLICY.key
     // Velox compares the value against upper-cased literals. ClickHouse lower-cases it itself, so

@@ -851,14 +851,25 @@ Java_org_apache_gluten_vectorized_LocalPartitionWriterJniWrapper_createPartition
   auto& conf = ctx->getConfMap();
   if (auto it = conf.find(kShuffleFileBufferSize); it != conf.end()) {
     try {
-      auto kib = std::stoll(it->second);
-      // Scaling to bytes can overflow where parsing did not: `stoll` throws on a value outside
-      // int64_t, but the multiplication would be undefined behaviour rather than an exception, so
-      // it has to be range-checked before it happens. Reject a non-positive value too - it is an
-      // allocation size, and `Spill::openForRead` takes it as unsigned, where a negative becomes a
-      // huge prefetch size and a zero divides by zero in `MmapFileStream`.
+      // `stoll` stops at the first character it cannot use and reports how far it got, so the whole
+      // string has to be checked as consumed. Without that, a value the JVM could not parse and
+      // therefore delivered unchanged - "1.5m", "10x" - would come through as 1 and 10 KiB rather
+      // than being rejected, and this is now the only reader of the key: the JVM-side read that used
+      // to run Spark's own converter over it is gone.
+      size_t consumed = 0;
+      auto kib = std::stoll(it->second, &consumed);
+      GLUTEN_CHECK(consumed == it->second.size(), "not a plain KiB count: " + it->second);
+      // Reject a non-positive value - it is an allocation size, and `Spill::openForRead` takes it as
+      // unsigned, where a negative becomes a huge prefetch size and a zero divides by zero in
+      // `MmapFileStream`. The upper bound is Spark's own, from the `checkValue` on
+      // `SHUFFLE_FILE_BUFFER_SIZE`: `ByteArrayMethods.MAX_ROUNDED_ARRAY_LENGTH / 1024`, i.e. the
+      // largest buffer a JVM byte array can hold. It also keeps the multiplication below from
+      // overflowing, which would be undefined behaviour rather than an exception.
+      constexpr int64_t kMaxShuffleFileBufferSizeKib = (std::numeric_limits<int32_t>::max() - 15) / 1024;
       GLUTEN_CHECK(
-          kib > 0 && kib <= std::numeric_limits<int64_t>::max() / 1024, "out of range for a KiB count: " + it->second);
+          kib > 0 && kib <= kMaxShuffleFileBufferSizeKib,
+          "out of range for a KiB count, must be in (0, " + std::to_string(kMaxShuffleFileBufferSizeKib) +
+              "]: " + it->second);
       shuffleFileBufferSize = kib * 1024;
     } catch (const std::exception& e) {
       // A malformed value should not fail shuffle writer creation when a sane native default is at

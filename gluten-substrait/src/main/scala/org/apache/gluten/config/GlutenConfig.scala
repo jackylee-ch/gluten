@@ -475,6 +475,10 @@ object GlutenConfig extends ConfigRegistry {
   val SPARK_OVERHEAD_FACTOR_KEY = "spark.executor.memoryOverheadFactor"
   val SPARK_REDACTION_REGEX = "spark.redaction.regex"
   val SPARK_SHUFFLE_FILE_BUFFER = "spark.shuffle.file.buffer"
+  // Spark's own bound on the above, from `ByteArrayMethods.MAX_ROUNDED_ARRAY_LENGTH / 1024` - the
+  // largest buffer a JVM byte array can hold. Restated rather than read back because
+  // `ByteArrayMethods` is a Spark-internal class and the value is a fixed platform limit.
+  val SPARK_SHUFFLE_FILE_BUFFER_MAX_KIB: Long = (Int.MaxValue - 15) / 1024
   val SPARK_UNSAFE_SORTER_SPILL_READER_BUFFER_SIZE = "spark.unsafe.sorter.spill.reader.buffer.size"
   val SPARK_SHUFFLE_SPILL_DISK_WRITE_BUFFER_SIZE = "spark.shuffle.spill.diskWriteBufferSize"
   val SPARK_SHUFFLE_SPILL_COMPRESS = "spark.shuffle.spill.compress"
@@ -573,6 +577,12 @@ object GlutenConfig extends ConfigRegistry {
     // `SQLConf.get` the delivery site already reads the conf map from.
     registerConf(SQLConf.MAP_KEY_DEDUP_POLICY.key)
       .stringConf
+      // Spark's own entry declares the same upper-casing transform, and native compares the
+      // delivered value against the literal "EXCEPTION" (`WholeStageResultIterator.cc:660`).
+      // Without it, `spark.sql.mapKeyDedupPolicy=exception` - which Spark accepts and normalizes -
+      // would read as LAST_WIN in native, so a duplicate map key would silently take the last
+      // value instead of raising.
+      .transform(_.toUpperCase(Locale.ROOT))
       .passToNative()
       // Native reads an absent key as non-throwing, contradicting Spark's default of EXCEPTION
       // (throw on duplicate keys). `toString` because Spark 4.1 declares the entry as an enum
@@ -606,8 +616,14 @@ object GlutenConfig extends ConfigRegistry {
       .bytesConf(ByteUnit.BYTE)
       .passToNative()
       .createOptional
+    // Spark declares a bound as well as a unit on this one, and native is now its only reader, so
+    // the bound is declared here too. A value outside it is not delivered in parsed form, and
+    // `createPartitionWriter` rejects it and falls back to its own default with a warning.
     registerConf(SPARK_SHUFFLE_FILE_BUFFER)
       .bytesConf(ByteUnit.KiB)
+      .checkValue(
+        v => v > 0 && v <= SPARK_SHUFFLE_FILE_BUFFER_MAX_KIB,
+        s"must be positive and at most $SPARK_SHUFFLE_FILE_BUFFER_MAX_KIB KiB")
       .passToNative()
       .createOptional
 
