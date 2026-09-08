@@ -197,4 +197,20 @@ object NativeConfRegistry extends Logging {
     runtimeEntries.remove(key)
     backendEntries.remove(key)
   }
+
+  /**
+   * Visible for testing. Clears the backend-channel latch so that a suite declaring confs after it
+   * has called `selectBackendConf` does not report every later declaration as late - which would
+   * make a real late declaration indistinguishable from test noise.
+   *
+   * Deliberately does not clear the entry maps. A JVM running one suite is also running others
+   * whose conf objects have already registered the real confs, and those registrations happen once
+   * per class initialization: dropping them would leave the registry permanently short of the confs
+   * the rest of the JVM expects, with no way to rebuild it. Use `unregister` for a key a test
+   * declared itself. `private[gluten]` because `ComponentSuite` lives in
+   * `org.apache.gluten.component`.
+   */
+  private[gluten] def resetBackendConfDeliveredForTesting(): Unit = {
+    backendConfDelivered = false
+  }
 }

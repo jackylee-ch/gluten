@@ -26,6 +26,10 @@ import java.util.Locale
 class NativeConfRegistrySuite extends AnyFunSuite {
 
   private def withRegisteredKeys(keys: String*)(f: => Unit): Unit = {
+    // A test that selects the backend channel latches it as delivered, so without this every
+    // declaration made by a later test would be reported as arriving too late. Clearing the latch
+    // per test keeps that warning meaning what it says.
+    NativeConfRegistry.resetBackendConfDeliveredForTesting()
     try f
     finally keys.foreach(NativeConfRegistry.unregister)
   }
