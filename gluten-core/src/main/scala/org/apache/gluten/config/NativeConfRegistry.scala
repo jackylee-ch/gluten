@@ -175,7 +175,12 @@ object NativeConfRegistry extends Logging {
    * runtime channel alone.
    */
   def selectBackendConf(conf: scala.collection.Map[String, String]): Map[String, String] = {
-    backendConfDelivered = true
+    // Guarded rather than written unconditionally: the ClickHouse backend selects the backend conf
+    // once per whole-stage pipeline, and a volatile store on every one of those is avoidable when
+    // the flag only ever moves from false to true.
+    if (!backendConfDelivered) {
+      backendConfDelivered = true
+    }
     select(backendEntries, conf)
   }
 

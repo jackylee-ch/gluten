@@ -349,8 +349,9 @@ values:
   `cpp/core/config/GlutenConfig.h` but read nowhere), yet still declared `passToNative()`: the
   ClickHouse backend is the consumer and reads it JVM-side out of the *delivered* backend conf map,
   in `CHTransformerApi.postProcessNativeConfig`. `spark.memory.offHeap.enabled` is declared for the
-  same reason. These two are the only keys whose delivery is justified by a JVM-side reader of the
-  delivered map rather than by a native read site.
+  same reason, and so are the four ClickHouse-only keys in `CHConfig` - the three
+  `spark.hadoop.input.*` timeouts and `spark.sql.orc.compression.codec`. For all six, the delivery is
+  justified by a JVM-side reader of the *delivered* map rather than by a native read site.
 - `spark.gluten.memory.task.offHeap.size.in.bytes` - read on both sides, see the table above.
 
 The first and last are declared `createOptional`, because the value cannot be derived without a

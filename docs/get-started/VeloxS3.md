@@ -180,8 +180,8 @@ Gluten new parameters:
 | secret.key | (none) |
 | endpoint | (none) |
 | connection.ssl.enabled | false |
-| path.style.access | false |
-| retry.limit | (none) |
+| path.style.access | true |
+| retry.limit | 20 |
 | retry.mode | legacy |
 | instance.credentials | false |
 | iam.role | (none) |
