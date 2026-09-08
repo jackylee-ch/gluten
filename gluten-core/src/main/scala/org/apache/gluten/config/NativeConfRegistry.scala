@@ -42,7 +42,7 @@ import scala.collection.JavaConverters._
  *   - `createWithDefault(value)`: the stated value in converted form.
  *   - `createWithDefaultFunction(f)`: `f`'s current result in converted form.
  */
-case class NativeConfEntry(
+private[config] case class NativeConfEntry(
     key: String,
     convert: String => String = identity,
     declaredDefault: () => Option[String] = () => None)

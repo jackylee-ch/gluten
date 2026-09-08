@@ -16,6 +16,7 @@
  */
 package org.apache.gluten.config
 
+import org.apache.spark.internal.Logging
 import org.apache.spark.network.util.{ByteUnit, JavaUtils}
 
 import java.util.concurrent.TimeUnit
@@ -25,7 +26,7 @@ object BackendType extends Enumeration {
   val COMMON, VELOX, CLICKHOUSE = Value
 }
 
-private[gluten] case class ConfigBuilder(key: String) {
+private[gluten] case class ConfigBuilder(key: String) extends Logging {
   import ConfigHelpers._
 
   private[config] var _doc = ""
@@ -157,10 +158,15 @@ private[gluten] case class ConfigBuilder(key: String) {
         case v => v.toString
       }
     } catch {
-      // A value Spark or Hadoop would reject is not this mechanism's business to validate: Spark or
-      // Hadoop raises on it at its own read site, with its own message. Deliver it unchanged rather
-      // than failing conf selection, which runs per task.
-      case _: IllegalArgumentException => raw
+      // A value the conf's own converter rejects is not this mechanism's business to raise on: the
+      // owner does that at its own read site, with its own message, and failing here would take
+      // down conf selection, which runs per task. It is worth a trace, though - the value reaches
+      // native unconverted, and a native read site that parses it loosely would use it silently.
+      case e: IllegalArgumentException =>
+        logWarning(
+          s"Value '$raw' of $key is not accepted by the conf's own converter (${e.getMessage}), " +
+            s"so it is passed to native side unconverted.")
+        raw
     }
   }
 
