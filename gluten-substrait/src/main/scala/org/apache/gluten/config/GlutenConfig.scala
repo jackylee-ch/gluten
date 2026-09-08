@@ -478,6 +478,9 @@ object GlutenConfig extends ConfigRegistry {
   // Spark's own bound on the above, from `ByteArrayMethods.MAX_ROUNDED_ARRAY_LENGTH / 1024` - the
   // largest buffer a JVM byte array can hold. Restated rather than read back because
   // `ByteArrayMethods` is a Spark-internal class and the value is a fixed platform limit.
+  // `kMaxShuffleFileBufferSizeKib` in `cpp/core/jni/JniWrapper.cc` repeats it, because native is
+  // the only reader of the key and has to enforce the bound on a value that failed this converter;
+  // keep the two in step.
   val SPARK_SHUFFLE_FILE_BUFFER_MAX_KIB: Long = (Int.MaxValue - 15) / 1024
   val SPARK_UNSAFE_SORTER_SPILL_READER_BUFFER_SIZE = "spark.unsafe.sorter.spill.reader.buffer.size"
   val SPARK_SHUFFLE_SPILL_DISK_WRITE_BUFFER_SIZE = "spark.shuffle.spill.diskWriteBufferSize"

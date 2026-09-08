@@ -865,6 +865,7 @@ Java_org_apache_gluten_vectorized_LocalPartitionWriterJniWrapper_createPartition
       // `SHUFFLE_FILE_BUFFER_SIZE`: `ByteArrayMethods.MAX_ROUNDED_ARRAY_LENGTH / 1024`, i.e. the
       // largest buffer a JVM byte array can hold. It also keeps the multiplication below from
       // overflowing, which would be undefined behaviour rather than an exception.
+      // Mirrors SPARK_SHUFFLE_FILE_BUFFER_MAX_KIB in GlutenConfig.scala; keep the two in step.
       constexpr int64_t kMaxShuffleFileBufferSizeKib = (std::numeric_limits<int32_t>::max() - 15) / 1024;
       GLUTEN_CHECK(
           kib > 0 && kib <= kMaxShuffleFileBufferSizeKib,

@@ -39,6 +39,8 @@ private[gluten] case class ConfigBuilder(key: String) extends Logging {
   private[config] var _isStatic = false
   private[config] var _passToNative = false
   private[config] var _isForeign = false
+  // See `convertForNative`: the warning it emits is worth one line per key, not one per delivery.
+  private var _warnedOnRejectedValue = false
 
   def doc(s: String): ConfigBuilder = {
     _doc = s
@@ -163,9 +165,16 @@ private[gluten] case class ConfigBuilder(key: String) extends Logging {
       // down conf selection, which runs per task. It is worth a trace, though - the value reaches
       // native unconverted, and a native read site that parses it loosely would use it silently.
       case e: IllegalArgumentException =>
-        logWarning(
-          s"Value '$raw' of $key is not accepted by the conf's own converter (${e.getMessage}), " +
-            s"so it is passed to native side unconverted.")
+        // Once per key, not once per delivery: conf selection runs per task, and a value nobody
+        // fixes would otherwise put a line in every executor log for every task. One closure per
+        // declaration owns this flag, so "once" means once per key per JVM. A race here costs a
+        // duplicate line, which is why it needs no synchronization.
+        if (!_warnedOnRejectedValue) {
+          _warnedOnRejectedValue = true
+          logWarning(
+            s"Value '$raw' of $key is not accepted by the conf's own converter " +
+              s"(${e.getMessage}), so it is passed to native side unconverted.")
+        }
         raw
     }
   }
